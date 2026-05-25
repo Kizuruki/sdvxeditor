@@ -44,16 +44,14 @@ const LN = {
 };
 const BT=[LN.a,LN.b,LN.c,LN.d], FX=[LN.fl,LN.fr];
 const T={SEL:0,BTC:1,BTH:2,FXC:3,FXH:4,LL:5,LR:6};
-const SNAPS=['1/4','1/8','1/12','1/16','1/24','1/32','1/48','1/64, 1/96, 1/128, 1/192, 1/1920'];
-const SL = SNAP_DIVS.map(v => `${v}`);
+const [snapDivs,setSnapDivs] = useState([
+  4,8,12,16,24,32,48,
+  64,96,128,192,1920
+]);
+
+const SL = snapDivs.map(v => `${v}`);
 const CVS=['linear','ease_in','ease_out','ease_inout','slam'];
-const audioCtxR = useRef(null);
-const audioBufferR = useRef(null);
-const sourceR = useRef(null);
 const HITSOUND_GAIN = 0.22;
-const [playing,setPlaying] = useState(false);
-const [playbackRate,setPlaybackRate] = useState(1);
-const [songTime,setSongTime] = useState(0);
 let _n=0; const uid=()=>++_n;
 const mkC=()=>({meta:{title:'',artist:'',effector:'',difficulty:'extended',level:1,bpm:120,music:'',offset:0},notes:[],lasers:{L:[],R:[]}});
 const s2=(v,s)=>Math.round(v/s)*s;
@@ -83,8 +81,9 @@ function App(){
   const [ch,setCh]=useState(700);
   const canR=useRef(null), ctrR=useRef(null);
   const snap =
-    1 / SNAP_DIVS[si];
-
+    1 / snapDivs[si];
+  const PPB = PPB_BASE * zoom;
+  const TB = TOTAL_M * BPMEAS;
   const b2y = useCallback(
     b => (b - sb) * PPB,
     [sb, PPB]
@@ -298,7 +297,7 @@ function App(){
       const bMin=Math.min(drag.sb,drag.currentBeat),bMax=Math.max(drag.sb,drag.currentBeat);
       const yTop=b2y(bMax),yBot=b2y(bMin),yH=Math.max(0,yBot-yTop);
       if(drag.type==='bth'){const l=BT[drag.idx];ctx.fillStyle='rgba(255,210,0,0.1)';ctx.strokeStyle='rgba(255,210,0,0.35)';ctx.lineWidth=1;ctx.fillRect(l.x+8,yTop,l.w-16,yH);ctx.strokeRect(l.x+8,yTop,l.w-16,yH);}
-      if(drag.type==='fxh'){const l=FX[drag.idx];ctx.fillStyle='rgba(255,130,0,0.1)';ctx.strokeStyle='rgba(255,130,0,0.35)';ctx.lineWidth=1;ctx.fillRect(l.x+4,yTop,l.w-8,yH);ctx.strokeRect(l.x+4,yTop,l.w-8,yH);}
+      if(drag.type==='fxh'){const l=FX[drag.idx];ctx.fillStyle='rgba(235,235,255,0.1)';ctx.strokeStyle='rgba(255,255,255,0.35)';ctx.lineWidth=1;ctx.fillRect(l.x+4,yTop,l.w-8,yH);ctx.strokeRect(l.x+4,yTop,l.w-8,yH);}
     }
 
     const cy=b2y(cur);
@@ -404,20 +403,13 @@ function App(){
       e.preventDefault();
   
       if (!audioCtxR.current) {
-        audioCtxR.current =
-          new AudioContext();
+        audioCtxR.current = new AudioContext();
       }
   
-      if (!audioBufferR.current)
-        return;
+      if (!audioBufferR.current) return;
   
       if (playing) {
         sourceR.current?.stop();
-      
-        setSongTime(
-          audioCtxR.current.currentTime
-        );
-      
         setPlaying(false);
         return;
       }
@@ -441,9 +433,7 @@ function App(){
   
       setPlaying(true);
   
-      const raf = () => {
-        if (!playing) return;
-  
+      const update = () => {
         const t =
           songTime +
           (
@@ -456,13 +446,17 @@ function App(){
           (t * chart.meta.bpm) / 60
         );
   
-        requestAnimationFrame(raf);
+        if (sourceR.current === src) {
+          requestAnimationFrame(update);
+        }
       };
   
-      requestAnimationFrame(raf);
+      requestAnimationFrame(update);
   
       src.onended = () => {
-        setPlaying(false);
+        if (sourceR.current === src) {
+          setPlaying(false);
+        }
       };
     };
   
@@ -535,7 +529,7 @@ function App(){
     fr.readAsText(f);e.target.value='';
   },[]);
 
-  const tls=[{id:T.SEL,n:'Select',k:'1',c:'#778899'},{id:T.BTC,n:'BT Chip',k:'2/H',c:'#ffdd00'},{id:T.BTH,n:'BT Hold',k:'3/J',c:'#ffaa00'},{id:T.FXC,n:'FX Chip',k:'4/K',c:'#ffffff'},{id:T.FXH,n:'FX Hold',k:'5/L',c:'#ff6600'},{id:T.LL,n:'Left Laser',k:'6/Q',c:'#22ccff'},{id:T.LR,n:'Right Laser',k:'7/W',c:'#ff2222'}];
+  const tls=[{id:T.SEL,n:'Select',k:'1',c:'#778899'},{id:T.BTC,n:'BT Chip',k:'2/H',c:'#ffdd00'},{id:T.BTH,n:'BT Hold',k:'3/J',c:'#ffaa00'},{id:T.FXC,n:'FX Chip',k:'4/K',c:'#ffffff'},{id:T.FXH,n:'FX Hold',k:'5/L',c:'#ffffff'},{id:T.LL,n:'Left Laser',k:'6/Q',c:'#22ccff'},{id:T.LR,n:'Right Laser',k:'7/W',c:'#ff2222'}];
   const ct=tls.find(t=>t.id===tool),cM=Math.floor(cur/BPMEAS)+1,cB=Math.floor(cur%BPMEAS)+1;
 
   const Bs=(a,c)=>({background:a?'#12122e':'#0b0b1c',border:`1px solid ${a?c||'#3344bb':'#1a1a30'}`,color:a?c||'#8899ee':'#445566',padding:'3px 7px',cursor:'pointer',fontSize:10,fontFamily:'monospace',borderRadius:2});
@@ -565,6 +559,11 @@ function App(){
         <span style={{color:'#556677',fontSize:9,minWidth:32,textAlign:'center'}}>{Math.round(zoom*100)}%</span>
         <button onClick={()=>setZoom(z=>Math.min(5,z+0.25))} style={{...Bs(false),padding:'2px 5px'}}>+</button>
         <span style={{color:'#334455',fontSize:9}}>CURVE</span>
+        <select value={cv} onChange={e=>setCv(e.target.value)} style={SEL}>{CVS.map(c=><option key={c} value={c}>{c}</option>)}</select>
+        <div style={{marginLeft:'auto',display:'flex',gap:4}}>
+          <button onClick={doUndo} style={Bs(false)} title="Undo (Ctrl+Z)"><i className="ti ti-arrow-back-up" aria-hidden="true"/> Undo</button>
+          <button onClick={doRedo} style={Bs(false)} title="Redo (Ctrl+Y)"><i className="ti ti-arrow-forward-up" aria-hidden="true"/> Redo</button>
+        </div>
         <div style={{display:'flex',gap:3}}>
           {[0.25,0.5,0.75,1].map(v=>(
             <button
@@ -578,11 +577,6 @@ function App(){
               {v}x
             </button>
           ))}
-        </div>
-        <select value={cv} onChange={e=>setCv(e.target.value)} style={SEL}>{CVS.map(c=><option key={c} value={c}>{c}</option>)}</select>
-        <div style={{marginLeft:'auto',display:'flex',gap:4}}>
-          <button onClick={doUndo} style={Bs(false)} title="Undo (Ctrl+Z)"><i className="ti ti-arrow-back-up" aria-hidden="true"/> Undo</button>
-          <button onClick={doRedo} style={Bs(false)} title="Redo (Ctrl+Y)"><i className="ti ti-arrow-forward-up" aria-hidden="true"/> Redo</button>
         </div>
       </div>
 
@@ -750,11 +744,9 @@ function App(){
               v>1920
             ) return;
       
-            SNAP_DIVS.push(v);
-      
-            setSi(
-              SNAP_DIVS.length-1
-            );
+            setSnapDivs(prev => [...prev, v]);
+            
+            setSi(snapDivs.length);
           }}
         />
       
