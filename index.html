@@ -44,10 +44,16 @@ const LN = {
 };
 const BT=[LN.a,LN.b,LN.c,LN.d], FX=[LN.fl,LN.fr];
 const T={SEL:0,BTC:1,BTH:2,FXC:3,FXH:4,LL:5,LR:6};
-const SNAPS=[1/4,1/8,1/12,1/16,1/24,1/32,1/48,1/64];
-const SL=['1/4','1/8','1/12','1/16','1/24','1/32','1/48','1/64'];
+const SNAPS=['1/4','1/8','1/12','1/16','1/24','1/32','1/48','1/64, 1/96, 1/128, 1/192, 1/1920'];
+const SL = SNAP_DIVS.map(v => `${v}`);
 const CVS=['linear','ease_in','ease_out','ease_inout','slam'];
+const audioCtxR = useRef(null);
+const audioBufferR = useRef(null);
+const sourceR = useRef(null);
 
+const [playing,setPlaying] = useState(false);
+const [playbackRate,setPlaybackRate] = useState(1);
+const [songTime,setSongTime] = useState(0);
 let _n=0; const uid=()=>++_n;
 const mkC=()=>({meta:{title:'',artist:'',effector:'',difficulty:'extended',level:1,bpm:120,music:'',offset:0},notes:[],lasers:{L:[],R:[]}});
 const s2=(v,s)=>Math.round(v/s)*s;
@@ -76,10 +82,16 @@ function App(){
   const [cw,setCw]=useState(600);
   const [ch,setCh]=useState(700);
   const canR=useRef(null), ctrR=useRef(null);
-  const snap=SNAPS[si], PPB=PPB_BASE*zoom, TB=TOTAL_M*BPMEAS;
+  const snap = 1 / SNAP_DIVS[si], PPB=PPB_BASE*zoom, TB=TOTAL_M*BPMEAS;
 
-  const b2y=useCallback(b=>ch-(b-sb)*PPB,[sb,PPB,ch]);
-  const y2b=useCallback(y=>sb+(ch-y)/PPB,[PPB,sb,ch]);
+  const b2y = useCallback(
+    b => (b - sb) * PPB,
+    [sb, PPB]
+  );
+  const y2b = useCallback(
+    y => sb + y / PPB,
+    [PPB, sb]
+  );
   const gc=useCallback(e=>{const r=canR.current.getBoundingClientRect();return{cx:(e.clientX-r.left)*CANVAS_W/cw,y:e.clientY-r.top};},[cw]);
 
   useEffect(()=>{
@@ -89,6 +101,29 @@ function App(){
     return()=>ro.disconnect();
   },[]);
 
+  useEffect(() => {
+    const canvas = canR.current;
+    if (!canvas) return;
+  
+    const wheelHandler = (e) => {
+      e.preventDefault();
+      onWheel(e);
+    };
+  
+    canvas.addEventListener(
+      'wheel',
+      wheelHandler,
+      { passive: false }
+    );
+  
+    return () => {
+      canvas.removeEventListener(
+        'wheel',
+        wheelHandler
+      );
+    };
+  }, [onWheel]);
+  
   const pushU=useCallback(c=>{setUndoS(u=>[...u.slice(-49),c]);setRedoS([]);},[]);
   const doUndo=useCallback(()=>{setUndoS(u=>{if(!u.length)return u;const p=u[u.length-1];setRedoS(r=>[chart,...r]);setChart(p);return u.slice(0,-1);});},[chart]);
   const doRedo=useCallback(()=>{setRedoS(r=>{if(!r.length)return r;const n=r[0];setUndoS(u=>[...u,chart]);setChart(n);return r.slice(1);});},[chart]);
@@ -116,7 +151,7 @@ function App(){
       ctx.strokeStyle=iM?'#424268':iB?'#252548':iH?'#1c1c38':'#131325';
       ctx.lineWidth=iM?1.5:0.5;
       ctx.beginPath();ctx.moveTo(ML,y);ctx.lineTo(CANVAS_W-3,y);ctx.stroke();
-      if (iM && b >= 0) { ctx.fillStyle = '#5566aa'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'right'; ctx.fillText(Math.round(b / BPMEAS) + 1, ML - 2, y + 3.5); ctx.textAlign = 'left'; }
+      if (iM && b >= 0) { ctx.fillStyle = '#5566aa'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'right'; ctx.fillText(Math.round(b / BPMEAS) + 1, ML - 2, y - 4); ctx.textAlign = 'left'; }
     }
 
     ctx.lineWidth=0.5;
@@ -142,41 +177,117 @@ function App(){
         ctx.fillStyle = '#ffdd00'; ctx.fillRect(l.x + 3, ya - 5, l.w - 6, 9); ctx.fillRect(l.x + 3, yb - 5, l.w - 6, 9);
       } else if(tp==='fx_chip'){
         const l=FX[lane],y=b2y(beat);if(y<-12||y>H+12)return;
-        ctx.fillStyle='#ff8800';ctx.fillRect(l.x+2,y-7,l.w-4,14);
-        ctx.strokeStyle='#ffaa44';ctx.lineWidth=1;ctx.strokeRect(l.x+2,y-7,l.w-4,14);
+        ctx.fillStyle='#f2f2ff';ctx.fillRect(l.x+2,y-7,l.w-4,14);
+        ctx.strokeStyle='#ffffff';ctx.lineWidth=1;ctx.strokeRect(l.x+2,y-7,l.w-4,14);
       } else if(tp==='fx_hold'){
         const l = FX[lane], ya = b2y(beat), yb = b2y(n.endBeat);
         const yTop = Math.min(ya, yb), yH = Math.abs(ya - yb);
         if (yTop > H + 12 || yTop + yH < -12) return;
-        ctx.fillStyle = 'rgba(255,128,0,0.32)'; ctx.fillRect(l.x + 4, yTop, l.w - 8, yH);
-        ctx.strokeStyle = '#ff8800'; ctx.lineWidth = 1.5; ctx.strokeRect(l.x + 4, yTop, l.w - 8, yH)
-        ctx.fillStyle = '#ff8800'; ctx.fillRect(l.x + 2, ya - 6, l.w - 4, 12); ctx.fillRect(l.x + 2, yb - 6, l.w - 4, 12);
+        ctx.fillStyle = 'rgba(235,235,255,0.28)'; ctx.fillRect(l.x + 4, yTop, l.w - 8, yH);
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.strokeRect(l.x + 4, yTop, l.w - 8, yH)
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(l.x + 2, ya - 6, l.w - 4, 12); ctx.fillRect(l.x + 2, yb - 6, l.w - 4, 12);
       }
     });
 
-    const drawLaser=(pts,lc,col)=>{
-      if(!pts.length)return;
-      ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
-      for(let i=0;i<pts.length-1;i++){
-        const p1=pts[i],p2=pts[i+1],y1=b2y(p1.beat),y2=b2y(p2.beat);
-        if(Math.max(y1,y2)<-8||Math.min(y1,y2)>H+8)continue;
-        const x1=lc.x+p1.pos*lc.w,x2=lc.x+p2.pos*lc.w;
-        ctx.strokeStyle=col;ctx.lineWidth=4;ctx.beginPath();
-        if(p1.curveType==='slam'){ctx.moveTo(x1,y1);ctx.lineTo(x2,y1+1);ctx.moveTo(x2,y1+1);ctx.lineTo(x2,y2);}
-        else if(p1.curveType==='linear'){ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);}
-        else{
-          const dy=y2-y1;let cy1,cy2;
-          if(p1.curveType==='ease_in'){cy1=y1+dy*0.85;cy2=y1+dy*0.95;}
-          else if(p1.curveType==='ease_out'){cy1=y1+dy*0.05;cy2=y1+dy*0.15;}
-          else{cy1=y1+dy*0.7;cy2=y1+dy*0.3;}
-          ctx.moveTo(x1,y1);ctx.bezierCurveTo(x1,cy1,x2,cy2,x2,y2);
+    const drawLaser = (pts, lc, col) => {
+      if (!pts.length) return;
+    
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+    
+      const drawSegment = (x1, y1, x2, y2, curve) => {
+        // glow
+        ctx.strokeStyle = col;
+        ctx.globalAlpha = 0.18;
+        ctx.lineWidth = 18;
+    
+        ctx.beginPath();
+    
+        if (curve === 'linear') {
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+        } else {
+          ctx.moveTo(x1, y1);
+          ctx.bezierCurveTo(
+            x1,
+            y1 + (y2-y1)*0.35,
+            x2,
+            y1 + (y2-y1)*0.65,
+            x2,
+            y2
+          );
         }
+    
         ctx.stroke();
+    
+        // body
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = 10;
+    
+        ctx.beginPath();
+    
+        if (curve === 'linear') {
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+        } else {
+          ctx.moveTo(x1, y1);
+          ctx.bezierCurveTo(
+            x1,
+            y1 + (y2-y1)*0.35,
+            x2,
+            y1 + (y2-y1)*0.65,
+            x2,
+            y2
+          );
+        }
+    
+        ctx.stroke();
+    
+        // highlight
+        ctx.strokeStyle = '#ffffff';
+        ctx.globalAlpha = 0.35;
+        ctx.lineWidth = 3;
+    
+        ctx.beginPath();
+    
+        if (curve === 'linear') {
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+        } else {
+          ctx.moveTo(x1, y1);
+          ctx.bezierCurveTo(
+            x1,
+            y1 + (y2-y1)*0.35,
+            x2,
+            y1 + (y2-y1)*0.65,
+            x2,
+            y2
+          );
+        }
+    
+        ctx.stroke();
+      };
+    
+      for (let i = 0; i < pts.length - 1; i++) {
+        const p1 = pts[i];
+        const p2 = pts[i + 1];
+    
+        const x1 = lc.x + p1.pos * lc.w;
+        const x2 = lc.x + p2.pos * lc.w;
+    
+        const y1 = b2y(p1.beat);
+        const y2 = b2y(p2.beat);
+    
+        drawSegment(
+          x1,
+          y1,
+          x2,
+          y2,
+          p1.curveType
+        );
       }
-      pts.forEach(p=>{
-        const y=b2y(p.beat);if(y<-8||y>H+8)return;
-        ctx.fillStyle=col;ctx.beginPath();ctx.arc(lc.x+p.pos*lc.w,y,5,0,Math.PI*2);ctx.fill();
-      });
+    
       ctx.restore();
     };
     drawLaser(chart.lasers.L,LN.ll,'#22ccff');
@@ -241,11 +352,36 @@ function App(){
     setDrag(null);
   },[drag,gc,y2b,snap]);
 
-  const onWheel=useCallback(e=>{
+  const onWheel = useCallback((e) => {
     e.preventDefault();
-    if(e.ctrlKey)setZoom(z=>Math.max(0.2,Math.min(5,z*(e.deltaY>0?0.85:1.18))));
-    else setSb(s=>Math.max(0,Math.min(TB,s+e.deltaY/PPB)));
-  },[PPB,TB]);
+  
+    // shift+scroll OR ctrl+scroll = zoom
+    if (e.shiftKey || e.ctrlKey) {
+      setZoom(z =>
+        Math.max(
+          0.15,
+          Math.min(
+            8,
+            z * (e.deltaY > 0 ? 0.92 : 1.08)
+          )
+        )
+      );
+      return;
+    }
+  
+    // FIXED DIRECTION
+    // wheel down -> timeline down
+    // wheel up -> timeline up
+    setSb(s =>
+      Math.max(
+        0,
+        Math.min(
+          TB,
+          s - e.deltaY / PPB
+        )
+      )
+    );
+  }, [PPB, TB]);
 
   useEffect(()=>{
     const h=e=>{
@@ -260,6 +396,87 @@ function App(){
     window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);
   },[doUndo,doRedo]);
 
+  useEffect(() => {
+    const h = async (e) => {
+      if (e.code !== 'Space') return;
+  
+      e.preventDefault();
+  
+      if (!audioCtxR.current) {
+        audioCtxR.current =
+          new AudioContext();
+      }
+  
+      if (!audioBufferR.current)
+        return;
+  
+      if (playing) {
+        sourceR.current?.stop();
+        setPlaying(false);
+        return;
+      }
+  
+      const src =
+        audioCtxR.current.createBufferSource();
+  
+      src.buffer = audioBufferR.current;
+      src.playbackRate.value = playbackRate;
+  
+      src.connect(
+        audioCtxR.current.destination
+      );
+  
+      sourceR.current = src;
+  
+      const started =
+        audioCtxR.current.currentTime;
+  
+      src.start(0, songTime);
+  
+      setPlaying(true);
+  
+      const raf = () => {
+        if (!playing) return;
+  
+        const t =
+          songTime +
+          (
+            audioCtxR.current.currentTime -
+            started
+          ) *
+          playbackRate;
+  
+        setSb(
+          (t * chart.meta.bpm) / 60
+        );
+  
+        requestAnimationFrame(raf);
+      };
+  
+      requestAnimationFrame(raf);
+  
+      src.onended = () => {
+        setPlaying(false);
+      };
+    };
+  
+    window.addEventListener(
+      'keydown',
+      h
+    );
+  
+    return () =>
+      window.removeEventListener(
+        'keydown',
+        h
+      );
+  }, [
+    playing,
+    playbackRate,
+    songTime,
+    chart.meta.bpm
+  ]);
+  
   const exportKSH=useCallback(()=>{
     const m=chart.meta,TPB=48,TPM=BPMEAS*TPB;
     const lines=[`title=${m.title}`,`artist=${m.artist}`,`effect=${m.effector||''}`,`jacket=jacket.jpg`,`difficulty=${m.difficulty}`,`level=${m.level}`,`t=${m.bpm}`,`m=${m.music||'audio.ogg'}`,`mvol=90`,`o=${m.offset}`,`bg=desert`,`layer=arrow`,`po=0`,`plength=15000`,`--`,`beat=4/4`];
@@ -344,6 +561,20 @@ function App(){
         <span style={{color:'#556677',fontSize:9,minWidth:32,textAlign:'center'}}>{Math.round(zoom*100)}%</span>
         <button onClick={()=>setZoom(z=>Math.min(5,z+0.25))} style={{...Bs(false),padding:'2px 5px'}}>+</button>
         <span style={{color:'#334455',fontSize:9}}>CURVE</span>
+        <div style={{display:'flex',gap:3}}>
+          {[0.25,0.5,0.75,1].map(v=>(
+            <button
+              key={v}
+              onClick={()=>setPlaybackRate(v)}
+              style={Bs(
+                playbackRate===v,
+                '#22ccff'
+              )}
+            >
+              {v}x
+            </button>
+          ))}
+        </div>
         <select value={cv} onChange={e=>setCv(e.target.value)} style={SEL}>{CVS.map(c=><option key={c} value={c}>{c}</option>)}</select>
         <div style={{marginLeft:'auto',display:'flex',gap:4}}>
           <button onClick={doUndo} style={Bs(false)} title="Undo (Ctrl+Z)"><i className="ti ti-arrow-back-up" aria-hidden="true"/> Undo</button>
@@ -356,7 +587,7 @@ function App(){
           <canvas ref={canR} width={cw} height={ch}
             style={{display:'block',cursor:tool===T.SEL?'default':'crosshair'}}
             onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
-            onMouseLeave={()=>setDrag(null)} onWheel={onWheel}/>
+            onMouseLeave={()=>setDrag(null)}/>
         </div>
 
         <div style={{width:205,background:'#0a0a1c',borderLeft:'1px solid #181830',display:'flex',flexDirection:'column',overflow:'hidden',flexShrink:0}}>
@@ -374,6 +605,37 @@ function App(){
                   ))}
                 </Sec>
                 <Sec title="Chart settings">
+                  <label style={{...Bs(false),cursor:'pointer'}}>
+                    Upload Music
+                    <input
+                      type="file"
+                      accept="audio/*"
+                      style={{display:'none'}}
+                      onChange={async e=>{
+                        const file = e.target.files[0];
+                        if(!file) return;
+                  
+                        if(!audioCtxR.current){
+                          audioCtxR.current =
+                            new AudioContext();
+                        }
+                  
+                        const arr =
+                          await file.arrayBuffer();
+                  
+                        audioBufferR.current =
+                          await audioCtxR.current.decodeAudioData(arr);
+                  
+                        setChart(p=>({
+                          ...p,
+                          meta:{
+                            ...p.meta,
+                            music:file.name
+                          }
+                        }));
+                      }}
+                    />
+                  </label>
                   <Fld label="BPM" type="number" value={chart.meta.bpm} onChange={v=>setChart(p=>({...p,meta:{...p.meta,bpm:+v||120}}))} INP={INP} LBL={LBL}/>
                   <div style={{display:'flex',flexDirection:'column',gap:2}}>
                     <span style={LBL}>Difficulty</span>
@@ -424,14 +686,103 @@ function App(){
         </div>
       </div>
 
-      <div style={{height:20,background:'#060609',borderTop:'1px solid #141424',display:'flex',alignItems:'center',gap:12,padding:'0 9px',fontSize:9,color:'#2a3a4a',flexShrink:0}}>
-        <span>Measure <span style={{color:'#6677aa'}}>{cM}</span></span>
-        <span>Beat <span style={{color:'#6677aa'}}>{cB}</span></span>
-        <span>BPM <span style={{color:'#6677aa'}}>{chart.meta.bpm}</span></span>
-        <span>Tool <span style={{color:ct?.c||'#6677aa'}}>{ct?.n}</span></span>
-        <span>Snap <span style={{color:'#6677aa'}}>{SL[si]}</span></span>
-        <span>Zoom <span style={{color:'#6677aa'}}>{Math.round(zoom*100)}%</span></span>
-        <span style={{marginLeft:'auto',color:'#1a2030'}}>scroll=navigate · ctrl+scroll=zoom · right click=delete</span>
+      <div
+        style={{
+          height:42,
+          background:'#060609',
+          borderTop:'1px solid #141424',
+          display:'flex',
+          alignItems:'center',
+          gap:10,
+          padding:'0 10px',
+          flexShrink:0
+        }}
+      >
+        <span style={{fontSize:10,color:'#556677'}}>
+          DIVISION
+        </span>
+      
+        <select
+          value={si}
+          onChange={e=>setSi(+e.target.value)}
+          style={{
+            background:'#0d0d1a',
+            color:'#ccd6ff',
+            border:'1px solid #222244',
+            height:24,
+            fontSize:11
+          }}
+        >
+          {SL.map((l,i)=>(
+            <option key={i} value={i}>
+              {l}
+            </option>
+          ))}
+        </select>
+      
+        <input
+          type="number"
+          min={1}
+          max={1920}
+          placeholder="custom"
+          style={{
+            width:70,
+            background:'#0d0d1a',
+            color:'#ccd6ff',
+            border:'1px solid #222244',
+            height:22
+          }}
+          onKeyDown={e=>{
+            if(e.key !== 'Enter') return;
+      
+            const v = parseInt(e.target.value);
+      
+            if(
+              isNaN(v) ||
+              v < 1 ||
+              v > 1920
+            ) return;
+      
+            SNAP_DIVS.push(v);
+            setSi(SNAP_DIVS.length - 1);
+          }}
+        />
+      
+        <span
+          style={{
+            fontSize:10,
+            color:'#556677',
+            marginLeft:20
+          }}
+        >
+          ZOOM
+        </span>
+      
+        <input
+          type="range"
+          min={0.15}
+          max={8}
+          step={0.01}
+          value={zoom}
+          onChange={e=>
+            setZoom(+e.target.value)
+          }
+          style={{width:220}}
+        />
+      
+        <span style={{color:'#99aaff'}}>
+          {Math.round(zoom*100)}%
+        </span>
+      
+        <span
+          style={{
+            marginLeft:'auto',
+            color:'#556677',
+            fontSize:10
+          }}
+        >
+          Space = Play/Pause
+        </span>
       </div>
     </div>
   );
