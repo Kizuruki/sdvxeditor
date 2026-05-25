@@ -32,7 +32,7 @@
   <div id="root"></div>
 
   <script type="text/babel">
-import { useState, useEffect, useRef, useCallback } from "react";
+const { useState, useEffect, useRef, useCallback } = React;
 
 const CANVAS_W = 280, ML = 26, PPB_BASE = 80, BPMEAS = 4, TOTAL_M = 128;
 const KL = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno';
@@ -61,7 +61,7 @@ const hL=(cx)=>{
   return null;
 };
 
-export default function App(){
+function App(){
   const [tool,setTool]=useState(T.BTC);
   const [si,setSi]=useState(3);
   const [zoom,setZoom]=useState(1.0);
