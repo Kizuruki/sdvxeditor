@@ -31,11 +31,428 @@
 <body>
   <div id="root"></div>
 
-  <!-- Paste your entire sdvx_editor.jsx code BELOW this line -->
   <script type="text/babel">
+import { useState, useEffect, useRef, useCallback } from "react";
 
-// paste sdvx_editor.jsx contents here
+const CANVAS_W = 280, ML = 26, PPB_BASE = 80, BPMEAS = 4, TOTAL_M = 128;
+const KL = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno';
 
+const LN = {
+  ll:{x:26,w:22}, a:{x:50,w:50}, b:{x:100,w:50},
+  c:{x:154,w:50}, d:{x:204,w:50}, lr:{x:256,w:22},
+  fl:{x:50,w:100}, fr:{x:154,w:100},
+};
+const BT=[LN.a,LN.b,LN.c,LN.d], FX=[LN.fl,LN.fr];
+const T={SEL:0,BTC:1,BTH:2,FXC:3,FXH:4,LL:5,LR:6};
+const SNAPS=[1/4,1/8,1/12,1/16,1/24,1/32,1/48,1/64];
+const SL=['1/4','1/8','1/12','1/16','1/24','1/32','1/48','1/64'];
+const CVS=['linear','ease_in','ease_out','ease_inout','slam'];
+
+let _n=0; const uid=()=>++_n;
+const mkC=()=>({meta:{title:'',artist:'',effector:'',difficulty:'extended',level:1,bpm:120,music:'',offset:0},notes:[],lasers:{L:[],R:[]}});
+const s2=(v,s)=>Math.round(v/s)*s;
+const p2k=(p)=>KL[Math.round(Math.max(0,Math.min(1,p))*50)];
+const k2p=(c)=>{const i=KL.indexOf(c);return i>=0?i/50:-1;};
+const hBT=(cx)=>{for(let i=0;i<BT.length;i++)if(cx>=BT[i].x&&cx<BT[i].x+BT[i].w)return i;return -1;};
+const hFX=(cx)=>{if(cx>=LN.fl.x&&cx<LN.fl.x+LN.fl.w)return 0;if(cx>=LN.fr.x&&cx<LN.fr.x+LN.fr.w)return 1;return -1;};
+const hL=(cx)=>{
+  if(cx>=LN.ll.x&&cx<LN.ll.x+LN.ll.w)return{s:'L',p:(cx-LN.ll.x)/LN.ll.w};
+  if(cx>=LN.lr.x&&cx<LN.lr.x+LN.lr.w)return{s:'R',p:(cx-LN.lr.x)/LN.lr.w};
+  return null;
+};
+
+export default function App(){
+  const [tool,setTool]=useState(T.BTC);
+  const [si,setSi]=useState(3);
+  const [zoom,setZoom]=useState(1.0);
+  const [sb,setSb]=useState(0);
+  const [chart,setChart]=useState(mkC);
+  const [undoS,setUndoS]=useState([]);
+  const [redoS,setRedoS]=useState([]);
+  const [cur,setCur]=useState(0);
+  const [drag,setDrag]=useState(null);
+  const [cv,setCv]=useState('linear');
+  const [panel,setPanel]=useState('chart');
+  const [cw,setCw]=useState(600);
+  const [ch,setCh]=useState(700);
+  const canR=useRef(null), ctrR=useRef(null);
+  const snap=SNAPS[si], PPB=PPB_BASE*zoom, TB=TOTAL_M*BPMEAS;
+
+  const b2y=useCallback(b=>ch-(b-sb)*PPB,[sb,PPB,ch]);
+  const y2b=useCallback(y=>sb+(ch-y)/PPB,[PPB,sb,ch]);
+  const gc=useCallback(e=>{const r=canR.current.getBoundingClientRect();return{cx:(e.clientX-r.left)*CANVAS_W/cw,y:e.clientY-r.top};},[cw]);
+
+  useEffect(()=>{
+    if(!ctrR.current)return;
+    const ro=new ResizeObserver(([e])=>{setCw(e.contentRect.width);setCh(e.contentRect.height);});
+    ro.observe(ctrR.current);
+    return()=>ro.disconnect();
+  },[]);
+
+  const pushU=useCallback(c=>{setUndoS(u=>[...u.slice(-49),c]);setRedoS([]);},[]);
+  const doUndo=useCallback(()=>{setUndoS(u=>{if(!u.length)return u;const p=u[u.length-1];setRedoS(r=>[chart,...r]);setChart(p);return u.slice(0,-1);});},[chart]);
+  const doRedo=useCallback(()=>{setRedoS(r=>{if(!r.length)return r;const n=r[0];setUndoS(u=>[...u,chart]);setChart(n);return r.slice(1);});},[chart]);
+
+  useEffect(()=>{
+    const canvas=canR.current;if(!canvas)return;
+    const ctx=canvas.getContext('2d');
+    const W=cw,H=ch,sx=W/CANVAS_W;
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle='#0c0c18';ctx.fillRect(0,0,W,H);
+    ctx.save();ctx.scale(sx,1);
+
+    ctx.fillStyle='#0e0e1c';FX.forEach(l=>ctx.fillRect(l.x,0,l.w,H));
+    ctx.fillStyle='#131326';BT.forEach(l=>ctx.fillRect(l.x,0,l.w,H));
+    ctx.fillStyle='#091828';ctx.fillRect(LN.ll.x,0,LN.ll.w,H);
+    ctx.fillStyle='#1e0808';ctx.fillRect(LN.lr.x,0,LN.lr.w,H);
+    ctx.fillStyle='#07070f';ctx.fillRect(0,0,ML,H);
+
+    const lo=Math.floor(sb-0.5),hi=Math.ceil(sb+H/PPB+1);
+    const tS=Math.floor(lo/snap),tE=Math.ceil(hi/snap)+1;
+    for(let t=tS;t<=tE;t++){
+      const b=Math.round(t*snap*1e6)/1e6;
+      const y=b2y(b);if(y<-2||y>H+2)continue;
+      const iM=Math.abs(b%BPMEAS)<1e-4,iB=Math.abs(b%1)<1e-4,iH=Math.abs(b%0.5)<1e-4;
+      ctx.strokeStyle=iM?'#424268':iB?'#252548':iH?'#1c1c38':'#131325';
+      ctx.lineWidth=iM?1.5:0.5;
+      ctx.beginPath();ctx.moveTo(ML,y);ctx.lineTo(CANVAS_W-3,y);ctx.stroke();
+      if (iM && b >= 0) { ctx.fillStyle = '#5566aa'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'right'; ctx.fillText(Math.round(b / BPMEAS) + 1, ML - 2, y + 3.5); ctx.textAlign = 'left'; }
+    }
+
+    ctx.lineWidth=0.5;
+    ctx.strokeStyle='#1e1e3a';
+    [LN.a.x,LN.b.x,LN.c.x,LN.d.x,LN.d.x+LN.d.w,LN.ll.x+LN.ll.w,LN.lr.x].forEach(x=>{
+      ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();
+    });
+    ctx.strokeStyle='#242450';ctx.lineWidth=1;
+    [LN.b.x+LN.b.w,LN.c.x].forEach(x=>{ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();});
+
+    chart.notes.forEach(n=>{
+      const{type:tp,lane,beat}=n;
+      if(tp==='bt_chip'){
+        const l=BT[lane],y=b2y(beat);if(y<-12||y>H+12)return;
+        ctx.fillStyle='#ffdd00';ctx.fillRect(l.x+3,y-5,l.w-6,9);
+        ctx.strokeStyle='#ffee66';ctx.lineWidth=1;ctx.strokeRect(l.x+3,y-5,l.w-6,9);
+      } else if(tp==='bt_hold'){
+        const l = BT[lane], ya = b2y(beat), yb = b2y(n.endBeat);
+        const yTop = Math.min(ya, yb), yH = Math.abs(ya - yb);
+        if (yTop > H + 12 || yTop + yH < -12) return;
+        ctx.fillStyle = 'rgba(255,210,0,0.28)'; ctx.fillRect(l.x + 8, yTop, l.w - 16, yH);
+        ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 1.5; ctx.strokeRect(l.x + 8, yTop, l.w - 16, yH);
+        ctx.fillStyle = '#ffdd00'; ctx.fillRect(l.x + 3, ya - 5, l.w - 6, 9); ctx.fillRect(l.x + 3, yb - 5, l.w - 6, 9);
+      } else if(tp==='fx_chip'){
+        const l=FX[lane],y=b2y(beat);if(y<-12||y>H+12)return;
+        ctx.fillStyle='#ff8800';ctx.fillRect(l.x+2,y-7,l.w-4,14);
+        ctx.strokeStyle='#ffaa44';ctx.lineWidth=1;ctx.strokeRect(l.x+2,y-7,l.w-4,14);
+      } else if(tp==='fx_hold'){
+        const l = FX[lane], ya = b2y(beat), yb = b2y(n.endBeat);
+        const yTop = Math.min(ya, yb), yH = Math.abs(ya - yb);
+        if (yTop > H + 12 || yTop + yH < -12) return;
+        ctx.fillStyle = 'rgba(255,128,0,0.32)'; ctx.fillRect(l.x + 4, yTop, l.w - 8, yH);
+        ctx.strokeStyle = '#ff8800'; ctx.lineWidth = 1.5; ctx.strokeRect(l.x + 4, yTop, l.w - 8, yH)
+        ctx.fillStyle = '#ff8800'; ctx.fillRect(l.x + 2, ya - 6, l.w - 4, 12); ctx.fillRect(l.x + 2, yb - 6, l.w - 4, 12);
+      }
+    });
+
+    const drawLaser=(pts,lc,col)=>{
+      if(!pts.length)return;
+      ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
+      for(let i=0;i<pts.length-1;i++){
+        const p1=pts[i],p2=pts[i+1],y1=b2y(p1.beat),y2=b2y(p2.beat);
+        if(Math.max(y1,y2)<-8||Math.min(y1,y2)>H+8)continue;
+        const x1=lc.x+p1.pos*lc.w,x2=lc.x+p2.pos*lc.w;
+        ctx.strokeStyle=col;ctx.lineWidth=4;ctx.beginPath();
+        if(p1.curveType==='slam'){ctx.moveTo(x1,y1);ctx.lineTo(x2,y1+1);ctx.moveTo(x2,y1+1);ctx.lineTo(x2,y2);}
+        else if(p1.curveType==='linear'){ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);}
+        else{
+          const dy=y2-y1;let cy1,cy2;
+          if(p1.curveType==='ease_in'){cy1=y1+dy*0.85;cy2=y1+dy*0.95;}
+          else if(p1.curveType==='ease_out'){cy1=y1+dy*0.05;cy2=y1+dy*0.15;}
+          else{cy1=y1+dy*0.7;cy2=y1+dy*0.3;}
+          ctx.moveTo(x1,y1);ctx.bezierCurveTo(x1,cy1,x2,cy2,x2,y2);
+        }
+        ctx.stroke();
+      }
+      pts.forEach(p=>{
+        const y=b2y(p.beat);if(y<-8||y>H+8)return;
+        ctx.fillStyle=col;ctx.beginPath();ctx.arc(lc.x+p.pos*lc.w,y,5,0,Math.PI*2);ctx.fill();
+      });
+      ctx.restore();
+    };
+    drawLaser(chart.lasers.L,LN.ll,'#22ccff');
+    drawLaser(chart.lasers.R,LN.lr,'#ff2222');
+
+    if(drag?.currentBeat!=null){
+      const bMin=Math.min(drag.sb,drag.currentBeat),bMax=Math.max(drag.sb,drag.currentBeat);
+      const yTop=b2y(bMax),yBot=b2y(bMin),yH=Math.max(0,yBot-yTop);
+      if(drag.type==='bth'){const l=BT[drag.idx];ctx.fillStyle='rgba(255,210,0,0.1)';ctx.strokeStyle='rgba(255,210,0,0.35)';ctx.lineWidth=1;ctx.fillRect(l.x+8,yTop,l.w-16,yH);ctx.strokeRect(l.x+8,yTop,l.w-16,yH);}
+      if(drag.type==='fxh'){const l=FX[drag.idx];ctx.fillStyle='rgba(255,130,0,0.1)';ctx.strokeStyle='rgba(255,130,0,0.35)';ctx.lineWidth=1;ctx.fillRect(l.x+4,yTop,l.w-8,yH);ctx.strokeRect(l.x+4,yTop,l.w-8,yH);}
+    }
+
+    const cy=b2y(cur);
+    if(cy>=18&&cy<=H){ctx.strokeStyle='rgba(255,255,255,0.1)';ctx.lineWidth=1;ctx.setLineDash([3,7]);ctx.beginPath();ctx.moveTo(ML,cy);ctx.lineTo(CANVAS_W,cy);ctx.stroke();ctx.setLineDash([]);}
+
+    ctx.fillStyle='rgba(12,12,24,0.92)';ctx.fillRect(0,0,CANVAS_W,18);
+    ctx.textAlign='center';ctx.font='bold 8px monospace';
+    [['L',LN.ll,'#22ccff'],['A',LN.a,'#556688'],['B',LN.b,'#556688'],['C',LN.c,'#556688'],['D',LN.d,'#556688'],['R',LN.lr,'#ff2222']].forEach(([lb,lc,co])=>{ctx.fillStyle=co;ctx.fillText(lb,lc.x+lc.w/2,12);});
+    ctx.fillStyle='#442200';ctx.font='7px monospace';
+    ctx.fillText('FX-L',LN.fl.x+LN.fl.w/2,12);ctx.fillText('FX-R',LN.fr.x+LN.fr.w/2,12);
+    ctx.textAlign='left';
+    ctx.restore();
+  },[chart,sb,PPB,cw,ch,b2y,snap,drag,cur]);
+
+  const onMove=useCallback(e=>{const{cx,y}=gc(e);setCur(s2(y2b(y),snap));if(drag)setDrag(d=>d?{...d,currentBeat:s2(y2b(y),snap)}:null);},[gc,y2b,snap,drag]);
+
+  const onDown=useCallback(e=>{
+    e.preventDefault();
+    const{cx,y}=gc(e);const b=s2(y2b(y),snap);const eps=snap*0.6;
+    const bi=hBT(cx),fi=hFX(cx),li=hL(cx);
+    if(e.button===2){
+      setChart(p=>({...p,
+        notes:p.notes.filter(n=>{
+          if(n.type==='bt_chip'&&bi>=0&&n.lane===bi&&Math.abs(n.beat-b)<eps)return false;
+          if(n.type==='bt_hold'&&bi>=0&&n.lane===bi&&b>=n.beat-eps&&b<=n.endBeat+eps)return false;
+          if(n.type==='fx_chip'&&fi>=0&&n.lane===fi&&Math.abs(n.beat-b)<eps)return false;
+          if(n.type==='fx_hold'&&fi>=0&&n.lane===fi&&b>=n.beat-eps&&b<=n.endBeat+eps)return false;
+          return true;
+        }),
+        lasers:{L:li?.s==='L'?p.lasers.L.filter(pt=>Math.abs(pt.beat-b)>=eps):p.lasers.L,R:li?.s==='R'?p.lasers.R.filter(pt=>Math.abs(pt.beat-b)>=eps):p.lasers.R}
+      }));
+      return;
+    }
+    if(e.button!==0)return;
+    pushU(chart);
+    if(tool===T.BTC&&bi>=0){setChart(p=>({...p,notes:[...p.notes.filter(n=>!(n.type==='bt_chip'&&n.lane===bi&&Math.abs(n.beat-b)<eps)),{id:uid(),type:'bt_chip',lane:bi,beat:b}]}));}
+    else if(tool===T.BTH&&bi>=0){setDrag({type:'bth',idx:bi,sb:b,currentBeat:b});}
+    else if(tool===T.FXC&&fi>=0){setChart(p=>({...p,notes:[...p.notes.filter(n=>!(n.type==='fx_chip'&&n.lane===fi&&Math.abs(n.beat-b)<eps)),{id:uid(),type:'fx_chip',lane:fi,beat:b}]}));}
+    else if(tool===T.FXH&&fi>=0){setDrag({type:'fxh',idx:fi,sb:b,currentBeat:b});}
+    else if (tool === T.LL && li?.s === 'L') { const pos = Math.max(0, Math.min(1, li.p)); setChart(p => ({ ...p, lasers: { ...p.lasers, L: [...p.lasers.L.filter(pt => Math.abs(pt.beat - b) >= eps), { beat: b, pos, curveType: cv }].sort((p1, p2) => p1.beat - p2.beat) } })); }
+    else if (tool === T.LR && li?.s === 'R') { const pos = Math.max(0, Math.min(1, li.p)); setChart(p => ({ ...p, lasers: { ...p.lasers, R: [...p.lasers.R.filter(pt => Math.abs(pt.beat - b) >= eps), { beat: b, pos, curveType: cv }].sort((p1, p2) => p1.beat - p2.beat) } })); }
+  },[gc,y2b,snap,tool,chart,pushU,cv]);
+
+  const onUp=useCallback(e=>{
+    if(!drag)return;
+    const{y}=gc(e);const b=s2(y2b(y),snap);
+    const st=Math.min(drag.sb,b),en=Math.max(drag.sb,b);
+    if(en-st>=snap*0.9){
+      if(drag.type==='bth')setChart(p=>({...p,notes:[...p.notes,{id:uid(),type:'bt_hold',lane:drag.idx,beat:st,endBeat:en}]}));
+      if(drag.type==='fxh')setChart(p=>({...p,notes:[...p.notes,{id:uid(),type:'fx_hold',lane:drag.idx,beat:st,endBeat:en}]}));
+    }
+    setDrag(null);
+  },[drag,gc,y2b,snap]);
+
+  const onWheel=useCallback(e=>{
+    e.preventDefault();
+    if(e.ctrlKey)setZoom(z=>Math.max(0.2,Math.min(5,z*(e.deltaY>0?0.85:1.18))));
+    else setSb(s=>Math.max(0,Math.min(TB,s+e.deltaY/PPB)));
+  },[PPB,TB]);
+
+  useEffect(()=>{
+    const h=e=>{
+      if(['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName))return;
+      if(!e.ctrlKey&&!e.altKey&&!e.shiftKey){
+        const m={'1':T.SEL,'2':T.BTC,'3':T.BTH,'4':T.FXC,'5':T.FXH,'6':T.LL,'7':T.LR,'h':T.BTC,'j':T.BTH,'k':T.FXC,'l':T.FXH,'q':T.LL,'w':T.LR};
+        if(m[e.key]!==undefined){setTool(m[e.key]);return;}
+      }
+      if(e.ctrlKey&&!e.shiftKey){if(e.key==='z'){doUndo();e.preventDefault();}if(e.key==='y'){doRedo();e.preventDefault();}const m={'4':0,'8':1,'6':3};if(m[e.key]!==undefined){setSi(m[e.key]);e.preventDefault();}}
+      if(e.ctrlKey&&e.shiftKey){const m={'4':4,'2':5,'8':6};if(m[e.key]!==undefined){setSi(m[e.key]);e.preventDefault();}}
+    };
+    window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);
+  },[doUndo,doRedo]);
+
+  const exportKSH=useCallback(()=>{
+    const m=chart.meta,TPB=48,TPM=BPMEAS*TPB;
+    const lines=[`title=${m.title}`,`artist=${m.artist}`,`effect=${m.effector||''}`,`jacket=jacket.jpg`,`difficulty=${m.difficulty}`,`level=${m.level}`,`t=${m.bpm}`,`m=${m.music||'audio.ogg'}`,`mvol=90`,`o=${m.offset}`,`bg=desert`,`layer=arrow`,`po=0`,`plength=15000`,`--`,`beat=4/4`];
+    for(let ms=0;ms<TOTAL_M;ms++){
+      for(let t=0;t<TPM;t++){
+        const beat=Math.round((ms*BPMEAS+t/TPB)*TPB)/TPB,eps=0.4/TPB;
+        const bt=['0','0','0','0'],fx=['0','0'],ls=['-','-'];
+        chart.notes.forEach(n=>{
+          if(n.type==='bt_chip'&&Math.abs(n.beat-beat)<eps)bt[n.lane]='1';
+          if(n.type==='bt_hold'&&beat>=n.beat-eps&&beat<=n.endBeat+eps)bt[n.lane]='2';
+          if(n.type==='fx_chip'&&Math.abs(n.beat-beat)<eps)fx[n.lane]='2';
+          if(n.type==='fx_hold'&&beat>=n.beat-eps&&beat<=n.endBeat+eps)fx[n.lane]='S';
+        });
+        ['L','R'].forEach((s,si)=>{const pts=chart.lasers[s];const ap=pts.find(p=>Math.abs(p.beat-beat)<eps);if(ap){ls[si]=p2k(ap.pos);}else{for(let i=0;i<pts.length-1;i++){if(beat>pts[i].beat+eps&&beat<pts[i+1].beat-eps){ls[si]=':';break;}}}});
+        lines.push(`${bt.join('')}|${fx.join('')}|${ls.join('')}`);
+      }
+      lines.push('--');
+    }
+    const blob=new Blob([lines.join('\n')],{type:'text/plain'}),url=URL.createObjectURL(blob);
+    Object.assign(document.createElement('a'),{href:url,download:`${m.title||'chart'}.ksh`}).click();
+    URL.revokeObjectURL(url);
+  },[chart]);
+
+  const importKSH=useCallback(e=>{
+    const f=e.target.files[0];if(!f)return;
+    const fr=new FileReader();
+    fr.onload=ev=>{
+      const lines=ev.target.result.split(/\r?\n/).map(l=>l.trim());
+      const meta={},notes=[],lasers={L:[],R:[]},btH=[null,null,null,null],fxH=[null,null];
+      let inD=false,ms=0,rows=[];
+      for(const line of lines){
+        if(!inD){if(line==='--'){inD=true;continue;}const ei=line.indexOf('=');if(ei>0)meta[line.slice(0,ei)]=line.slice(ei+1);}
+        else{
+          if(line==='--'){
+            const n=rows.length;
+            rows.forEach((row,idx)=>{
+              const beat=Math.round((ms*BPMEAS+idx*BPMEAS/n)*1000)/1000;
+              const[bs,fs,ls]=row.split('|');if(!bs||!fs||!ls)return;
+              for(let i=0;i<4;i++){const c=bs[i]||'0';if(c==='1')notes.push({id:uid(),type:'bt_chip',lane:i,beat});if(c==='2'&&btH[i]==null)btH[i]=beat;if(c==='0'&&btH[i]!=null){notes.push({id:uid(),type:'bt_hold',lane:i,beat:btH[i],endBeat:beat});btH[i]=null;}}
+              for(let i=0;i<2;i++){const c=fs[i]||'0';if(c==='2')notes.push({id:uid(),type:'fx_chip',lane:i,beat});if(c!=='0'&&c!=='2'&&c!=='-'&&fxH[i]==null)fxH[i]=beat;if((c==='0'||c==='-')&&fxH[i]!=null){notes.push({id:uid(),type:'fx_hold',lane:i,beat:fxH[i],endBeat:beat});fxH[i]=null;}}
+              ['L','R'].forEach((s,si)=>{const c=ls[si];if(c&&c!=='-'&&c!==':'){const p=k2p(c);if(p>=0)lasers[s].push({beat,pos:p,curveType:'linear'});}});
+            });
+            ms++;rows=[];
+          } else if(line&&!line.startsWith('//')&&!line.startsWith('#')&&line.includes('|')){rows.push(line);}
+        }
+      }
+      setChart({meta:{title:meta.title||'',artist:meta.artist||'',effector:meta.effect||'',difficulty:meta.difficulty||'extended',level:parseInt(meta.level)||1,bpm:parseFloat(meta.t)||120,music:meta.m||'',offset:parseInt(meta.o)||0},notes,lasers});
+      setUndoS([]);setRedoS([]);
+    };
+    fr.readAsText(f);e.target.value='';
+  },[]);
+
+  const tls=[{id:T.SEL,n:'Select',k:'1',c:'#778899'},{id:T.BTC,n:'BT Chip',k:'2/H',c:'#ffdd00'},{id:T.BTH,n:'BT Hold',k:'3/J',c:'#ffaa00'},{id:T.FXC,n:'FX Chip',k:'4/K',c:'#ff8800'},{id:T.FXH,n:'FX Hold',k:'5/L',c:'#ff6600'},{id:T.LL,n:'Left Laser',k:'6/Q',c:'#22ccff'},{id:T.LR,n:'Right Laser',k:'7/W',c:'#ff2222'}];
+  const ct=tls.find(t=>t.id===tool),cM=Math.floor(cur/BPMEAS)+1,cB=Math.floor(cur%BPMEAS)+1;
+
+  const Bs=(a,c)=>({background:a?'#12122e':'#0b0b1c',border:`1px solid ${a?c||'#3344bb':'#1a1a30'}`,color:a?c||'#8899ee':'#445566',padding:'3px 7px',cursor:'pointer',fontSize:10,fontFamily:'monospace',borderRadius:2});
+  const INP={background:'#080810',border:'1px solid #171728',color:'#99aabb',padding:'3px 6px',fontSize:11,width:'100%',boxSizing:'border-box',fontFamily:'monospace'};
+  const SEL={background:'#080810',border:'1px solid #171728',color:'#99aabb',padding:'3px 5px',fontSize:10,fontFamily:'monospace'};
+  const LBL={fontSize:8,color:'#3a4a5a',textTransform:'uppercase',letterSpacing:1};
+
+  return(
+    <div style={{display:'flex',flexDirection:'column',height:'100vh',background:'#08080f',color:'#99aabb',fontFamily:'monospace',fontSize:11,userSelect:'none',overflow:'hidden'}}>
+      <div style={{height:42,background:'#0a0a1c',borderBottom:'1px solid #181830',display:'flex',alignItems:'center',gap:5,padding:'0 8px',flexShrink:0}}>
+        <label style={{...Bs(false),cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
+          <i className="ti ti-folder-open" aria-hidden="true"/>Open .ksh
+          <input type="file" accept=".ksh" onChange={importKSH} style={{display:'none'}}/>
+        </label>
+        <button onClick={exportKSH} style={{...Bs(false),display:'flex',alignItems:'center',gap:4}}>
+          <i className="ti ti-device-floppy" aria-hidden="true"/>Export .ksh
+        </button>
+        <div style={{width:1,height:24,background:'#181830',flexShrink:0}}/>
+        {tls.map(t=>(
+          <button key={t.id} onClick={()=>setTool(t.id)} title={`${t.n} [${t.k}]`} style={{...Bs(tool===t.id,t.c),padding:'3px 6px'}}>
+            <span style={{color:tool===t.id?t.c:'#445566'}}>{t.n}</span>
+          </button>
+        ))}
+        <div style={{width:1,height:24,background:'#181830',flexShrink:0}}/>
+        <span style={{color:'#334455',fontSize:9}}>SNAP</span>
+        <select value={si} onChange={e=>setSi(+e.target.value)} style={SEL}>{SL.map((l,i)=><option key={i} value={i}>{l}</option>)}</select>
+        <span style={{color:'#334455',fontSize:9}}>ZOOM</span>
+        <button onClick={()=>setZoom(z=>Math.max(0.2,z-0.25))} style={{...Bs(false),padding:'2px 5px'}}>−</button>
+        <span style={{color:'#556677',fontSize:9,minWidth:32,textAlign:'center'}}>{Math.round(zoom*100)}%</span>
+        <button onClick={()=>setZoom(z=>Math.min(5,z+0.25))} style={{...Bs(false),padding:'2px 5px'}}>+</button>
+        <span style={{color:'#334455',fontSize:9}}>CURVE</span>
+        <select value={cv} onChange={e=>setCv(e.target.value)} style={SEL}>{CVS.map(c=><option key={c} value={c}>{c}</option>)}</select>
+        <div style={{marginLeft:'auto',display:'flex',gap:4}}>
+          <button onClick={doUndo} style={Bs(false)} title="Undo (Ctrl+Z)"><i className="ti ti-arrow-back-up" aria-hidden="true"/> Undo</button>
+          <button onClick={doRedo} style={Bs(false)} title="Redo (Ctrl+Y)"><i className="ti ti-arrow-forward-up" aria-hidden="true"/> Redo</button>
+        </div>
+      </div>
+
+      <div style={{flex:1,display:'flex',minHeight:0}}>
+        <div ref={ctrR} style={{flex:1,overflow:'hidden',position:'relative'}} onContextMenu={e=>e.preventDefault()}>
+          <canvas ref={canR} width={cw} height={ch}
+            style={{display:'block',cursor:tool===T.SEL?'default':'crosshair'}}
+            onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
+            onMouseLeave={()=>setDrag(null)} onWheel={onWheel}/>
+        </div>
+
+        <div style={{width:205,background:'#0a0a1c',borderLeft:'1px solid #181830',display:'flex',flexDirection:'column',overflow:'hidden',flexShrink:0}}>
+          <div style={{display:'flex',borderBottom:'1px solid #181830',flexShrink:0}}>
+            {['Chart','Controls'].map(tab=>{const k=tab==='Chart'?'chart':'controls';return(
+              <button key={tab} onClick={()=>setPanel(k)} style={{flex:1,padding:'6px 4px',background:panel===k?'#0e0e28':'transparent',border:'none',borderBottom:panel===k?'2px solid #3344bb':'2px solid transparent',color:panel===k?'#8899ee':'#334455',cursor:'pointer',fontSize:10,fontFamily:'monospace'}}>{tab}</button>
+            );})}
+          </div>
+          <div style={{flex:1,overflowY:'auto',padding:9}}>
+            {panel==='chart'?(
+              <div style={{display:'flex',flexDirection:'column',gap:9}}>
+                <Sec title="Metadata">
+                  {[['title','Title'],['artist','Artist'],['effector','Effector'],['music','Music file']].map(([k,l])=>(
+                    <Fld key={k} label={l} value={chart.meta[k]} onChange={v=>setChart(p=>({...p,meta:{...p.meta,[k]:v}}))} INP={INP} LBL={LBL}/>
+                  ))}
+                </Sec>
+                <Sec title="Chart settings">
+                  <Fld label="BPM" type="number" value={chart.meta.bpm} onChange={v=>setChart(p=>({...p,meta:{...p.meta,bpm:+v||120}}))} INP={INP} LBL={LBL}/>
+                  <div style={{display:'flex',flexDirection:'column',gap:2}}>
+                    <span style={LBL}>Difficulty</span>
+                    <select value={chart.meta.difficulty} style={{...SEL,width:'100%'}} onChange={e=>setChart(p=>({...p,meta:{...p.meta,difficulty:e.target.value}}))}>
+                      {['novice','advanced','exhaust','maximum','infinite','gravity','heavenly','vivid','exceed','extended'].map(d=><option key={d}>{d}</option>)}
+                    </select>
+                  </div>
+                  <Fld label="Level (1-20)" type="number" value={chart.meta.level} onChange={v=>setChart(p=>({...p,meta:{...p.meta,level:+v||1}}))} INP={INP} LBL={LBL}/>
+                  <Fld label="Offset (ms)" type="number" value={chart.meta.offset} onChange={v=>setChart(p=>({...p,meta:{...p.meta,offset:+v||0}}))} INP={INP} LBL={LBL}/>
+                </Sec>
+                <Sec title="Note count">
+                  {[['BT Chips',chart.notes.filter(n=>n.type==='bt_chip').length,'#ffdd00'],['BT Holds',chart.notes.filter(n=>n.type==='bt_hold').length,'#ffaa00'],['FX Chips',chart.notes.filter(n=>n.type==='fx_chip').length,'#ff8800'],['FX Holds',chart.notes.filter(n=>n.type==='fx_hold').length,'#ff6600'],['L Laser pts',chart.lasers.L.length,'#22ccff'],['R Laser pts',chart.lasers.R.length,'#ff2222']].map(([l,v,c])=>(
+                    <div key={l} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',borderBottom:'1px solid #0f0f20'}}><span style={{color:'#334455'}}>{l}</span><span style={{color:c}}>{v}</span></div>
+                  ))}
+                </Sec>
+              </div>
+            ):(
+              <div style={{display:'flex',flexDirection:'column',gap:9,fontSize:10}}>
+                <Sec title="Tools">
+                  {tls.map(t=>(
+                    <div key={t.id} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',color:tool===t.id?t.c:'#334455',borderBottom:'1px solid #0f0f20'}}>
+                      <span>{t.n}</span><span style={{color:'#2a3a4a'}}>[{t.k}]</span>
+                    </div>
+                  ))}
+                </Sec>
+                <Sec title="Mouse controls">
+                  {[['Left click','Place note / laser pt'],['Left drag','Create hold (drag to extend)'],['Right click','Delete note / laser pt'],['Ctrl + scroll','Zoom in / out'],['Scroll wheel','Navigate timeline']].map(([k,v])=>(
+                    <div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',borderBottom:'1px solid #0f0f20'}}><span style={{color:'#2a3a4a'}}>{k}</span><span style={{color:'#334455'}}>{v}</span></div>
+                  ))}
+                </Sec>
+                <Sec title="Snap hotkeys">
+                  {[['Ctrl+4','1/4'],['Ctrl+8','1/8'],['Ctrl+6','1/16'],['Ctrl+Shift+4','1/24'],['Ctrl+Shift+2','1/32'],['Ctrl+Shift+8','1/48']].map(([k,v])=>(
+                    <div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',borderBottom:'1px solid #0f0f20'}}><span style={{color:'#2a3a4a'}}>{k}</span><span style={{color:'#334455'}}>{v}</span></div>
+                  ))}
+                </Sec>
+                <Sec title="Laser curve types">
+                  <div style={{color:'#2a3a4a',fontSize:9,marginBottom:4}}>Choose curve before placing laser points. Set in toolbar or click below.</div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:3}}>
+                    {CVS.map(c=><button key={c} onClick={()=>setCv(c)} style={{...Bs(cv===c,'#22ccff'),padding:'2px 6px',fontSize:9}}>{c}</button>)}
+                  </div>
+                </Sec>
+                <Sec title="Export notes">
+                  <div style={{color:'#2a3a4a',fontSize:9}}>FX holds export with 'S' effect (flanger). Edit the .ksh file to change FX hold effects. Laser positions use 51-step KSH encoding (0=left, P=center, o=right).</div>
+                </Sec>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div style={{height:20,background:'#060609',borderTop:'1px solid #141424',display:'flex',alignItems:'center',gap:12,padding:'0 9px',fontSize:9,color:'#2a3a4a',flexShrink:0}}>
+        <span>Measure <span style={{color:'#6677aa'}}>{cM}</span></span>
+        <span>Beat <span style={{color:'#6677aa'}}>{cB}</span></span>
+        <span>BPM <span style={{color:'#6677aa'}}>{chart.meta.bpm}</span></span>
+        <span>Tool <span style={{color:ct?.c||'#6677aa'}}>{ct?.n}</span></span>
+        <span>Snap <span style={{color:'#6677aa'}}>{SL[si]}</span></span>
+        <span>Zoom <span style={{color:'#6677aa'}}>{Math.round(zoom*100)}%</span></span>
+        <span style={{marginLeft:'auto',color:'#1a2030'}}>scroll=navigate · ctrl+scroll=zoom · right click=delete</span>
+      </div>
+    </div>
+  );
+}
+
+function Sec({title,children}){
+  return(
+    <div>
+      <div style={{fontSize:8,color:'#2a3a4a',textTransform:'uppercase',letterSpacing:1.5,borderBottom:'1px solid #0e0e1e',paddingBottom:3,marginBottom:5}}>{title}</div>
+      <div style={{display:'flex',flexDirection:'column',gap:4}}>{children}</div>
+    </div>
+  );
+}
+function Fld({label,value,onChange,type='text',INP,LBL}){
+  return(
+    <div style={{display:'flex',flexDirection:'column',gap:2}}>
+      <span style={LBL}>{label}</span>
+      <input type={type} value={value} onChange={e=>onChange(e.target.value)} style={INP}/>
+    </div>
+  );
+}
   </script>
 
   <script type="text/babel">
