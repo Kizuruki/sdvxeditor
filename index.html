@@ -50,7 +50,7 @@ const CVS=['linear','ease_in','ease_out','ease_inout','slam'];
 const audioCtxR = useRef(null);
 const audioBufferR = useRef(null);
 const sourceR = useRef(null);
-
+const HITSOUND_GAIN = 0.22;
 const [playing,setPlaying] = useState(false);
 const [playbackRate,setPlaybackRate] = useState(1);
 const [songTime,setSongTime] = useState(0);
@@ -82,7 +82,8 @@ function App(){
   const [cw,setCw]=useState(600);
   const [ch,setCh]=useState(700);
   const canR=useRef(null), ctrR=useRef(null);
-  const snap = 1 / SNAP_DIVS[si], PPB=PPB_BASE*zoom, TB=TOTAL_M*BPMEAS;
+  const snap =
+    1 / SNAP_DIVS[si];
 
   const b2y = useCallback(
     b => (b - sb) * PPB,
@@ -412,6 +413,11 @@ function App(){
   
       if (playing) {
         sourceR.current?.stop();
+      
+        setSongTime(
+          audioCtxR.current.currentTime
+        );
+      
         setPlaying(false);
         return;
       }
@@ -529,7 +535,7 @@ function App(){
     fr.readAsText(f);e.target.value='';
   },[]);
 
-  const tls=[{id:T.SEL,n:'Select',k:'1',c:'#778899'},{id:T.BTC,n:'BT Chip',k:'2/H',c:'#ffdd00'},{id:T.BTH,n:'BT Hold',k:'3/J',c:'#ffaa00'},{id:T.FXC,n:'FX Chip',k:'4/K',c:'#ff8800'},{id:T.FXH,n:'FX Hold',k:'5/L',c:'#ff6600'},{id:T.LL,n:'Left Laser',k:'6/Q',c:'#22ccff'},{id:T.LR,n:'Right Laser',k:'7/W',c:'#ff2222'}];
+  const tls=[{id:T.SEL,n:'Select',k:'1',c:'#778899'},{id:T.BTC,n:'BT Chip',k:'2/H',c:'#ffdd00'},{id:T.BTH,n:'BT Hold',k:'3/J',c:'#ffaa00'},{id:T.FXC,n:'FX Chip',k:'4/K',c:'#ffffff'},{id:T.FXH,n:'FX Hold',k:'5/L',c:'#ff6600'},{id:T.LL,n:'Left Laser',k:'6/Q',c:'#22ccff'},{id:T.LR,n:'Right Laser',k:'7/W',c:'#ff2222'}];
   const ct=tls.find(t=>t.id===tool),cM=Math.floor(cur/BPMEAS)+1,cB=Math.floor(cur%BPMEAS)+1;
 
   const Bs=(a,c)=>({background:a?'#12122e':'#0b0b1c',border:`1px solid ${a?c||'#3344bb':'#1a1a30'}`,color:a?c||'#8899ee':'#445566',padding:'3px 7px',cursor:'pointer',fontSize:10,fontFamily:'monospace',borderRadius:2});
@@ -554,8 +560,6 @@ function App(){
           </button>
         ))}
         <div style={{width:1,height:24,background:'#181830',flexShrink:0}}/>
-        <span style={{color:'#334455',fontSize:9}}>SNAP</span>
-        <select value={si} onChange={e=>setSi(+e.target.value)} style={SEL}>{SL.map((l,i)=><option key={i} value={i}>{l}</option>)}</select>
         <span style={{color:'#334455',fontSize:9}}>ZOOM</span>
         <button onClick={()=>setZoom(z=>Math.max(0.2,z-0.25))} style={{...Bs(false),padding:'2px 5px'}}>−</button>
         <span style={{color:'#556677',fontSize:9,minWidth:32,textAlign:'center'}}>{Math.round(zoom*100)}%</span>
@@ -647,7 +651,7 @@ function App(){
                   <Fld label="Offset (ms)" type="number" value={chart.meta.offset} onChange={v=>setChart(p=>({...p,meta:{...p.meta,offset:+v||0}}))} INP={INP} LBL={LBL}/>
                 </Sec>
                 <Sec title="Note count">
-                  {[['BT Chips',chart.notes.filter(n=>n.type==='bt_chip').length,'#ffdd00'],['BT Holds',chart.notes.filter(n=>n.type==='bt_hold').length,'#ffaa00'],['FX Chips',chart.notes.filter(n=>n.type==='fx_chip').length,'#ff8800'],['FX Holds',chart.notes.filter(n=>n.type==='fx_hold').length,'#ff6600'],['L Laser pts',chart.lasers.L.length,'#22ccff'],['R Laser pts',chart.lasers.R.length,'#ff2222']].map(([l,v,c])=>(
+                  {[['BT Chips',chart.notes.filter(n=>n.type==='bt_chip').length,'#ffdd00'],['BT Holds',chart.notes.filter(n=>n.type==='bt_hold').length,'#ffaa00'],['FX Chips',chart.notes.filter(n=>n.type==='fx_chip').length,'#ffffff'],['FX Holds',chart.notes.filter(n=>n.type==='fx_hold').length,'#ff6600'],['L Laser pts',chart.lasers.L.length,'#22ccff'],['R Laser pts',chart.lasers.R.length,'#ff2222']].map(([l,v,c])=>(
                     <div key={l} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',borderBottom:'1px solid #0f0f20'}}><span style={{color:'#334455'}}>{l}</span><span style={{color:c}}>{v}</span></div>
                   ))}
                 </Sec>
@@ -698,7 +702,10 @@ function App(){
           flexShrink:0
         }}
       >
-        <span style={{fontSize:10,color:'#556677'}}>
+        <span style={{
+          fontSize:10,
+          color:'#556677'
+        }}>
           DIVISION
         </span>
       
@@ -735,26 +742,27 @@ function App(){
           onKeyDown={e=>{
             if(e.key !== 'Enter') return;
       
-            const v = parseInt(e.target.value);
+            const v=parseInt(e.target.value);
       
             if(
               isNaN(v) ||
-              v < 1 ||
-              v > 1920
+              v<1 ||
+              v>1920
             ) return;
       
             SNAP_DIVS.push(v);
-            setSi(SNAP_DIVS.length - 1);
+      
+            setSi(
+              SNAP_DIVS.length-1
+            );
           }}
         />
       
-        <span
-          style={{
-            fontSize:10,
-            color:'#556677',
-            marginLeft:20
-          }}
-        >
+        <span style={{
+          fontSize:10,
+          color:'#556677',
+          marginLeft:20
+        }}>
           ZOOM
         </span>
       
@@ -774,13 +782,11 @@ function App(){
           {Math.round(zoom*100)}%
         </span>
       
-        <span
-          style={{
-            marginLeft:'auto',
-            color:'#556677',
-            fontSize:10
-          }}
-        >
+        <span style={{
+          marginLeft:'auto',
+          color:'#556677',
+          fontSize:10
+        }}>
           Space = Play/Pause
         </span>
       </div>
@@ -804,10 +810,12 @@ function Fld({label,value,onChange,type='text',INP,LBL}){
     </div>
   );
 }
+ReactDOM
+  .createRoot(
+    document.getElementById("root")
+  )
+  .render(<App />);
   </script>
 
-  <script type="text/babel">
-    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
-  </script>
 </body>
 </html>
