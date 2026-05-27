@@ -4,72 +4,62 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SDVX Editor</title>
-
-  <!-- React -->
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-
-  <!-- Babel for JSX -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-  <!-- Tabler Icons -->
-  <link
-    rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css"
-  />
-
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css"/>
   <style>
-    html, body, #root {
-      margin: 0;
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      background: #08080f;
-    }
+    html,body,#root{margin:0;width:100%;height:100%;overflow:hidden;background:#08080f;}
+    ::-webkit-scrollbar{width:4px;height:4px;}
+    ::-webkit-scrollbar-thumb{background:#1a1a38;border-radius:2px;}
   </style>
 </head>
 <body>
-  <div id="root"></div>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback,useMemo}=React;
 
-  <script type="text/babel">
-const { useState, useEffect, useRef, useCallback } = React;
-
-const CANVAS_W = 280, ML = 26, PPB_BASE = 80, BPMEAS = 4, TOTAL_M = 128;
-const KL = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno';
-
-const LN = {
-  ll:{x:26,w:22}, a:{x:50,w:50}, b:{x:100,w:50},
-  c:{x:154,w:50}, d:{x:204,w:50}, lr:{x:256,w:22},
-  fl:{x:50,w:100}, fr:{x:154,w:100},
-};
-const BT=[LN.a,LN.b,LN.c,LN.d], FX=[LN.fl,LN.fr];
+// ── Module-level constants only (NO hooks here) ──────────────────────────
+const CANVAS_W=280,ML=26,PPB_BASE=80,BPMEAS=4,TOTAL_M=128;
+const KL='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno';
+const LN={ll:{x:26,w:22},a:{x:50,w:50},b:{x:100,w:50},c:{x:154,w:50},d:{x:204,w:50},lr:{x:256,w:22},fl:{x:50,w:100},fr:{x:154,w:100}};
+const BT=[LN.a,LN.b,LN.c,LN.d],FX=[LN.fl,LN.fr];
 const T={SEL:0,BTC:1,BTH:2,FXC:3,FXH:4,LL:5,LR:6};
-const [snapDivs,setSnapDivs] = useState([
-  4,8,12,16,24,32,48,
-  64,96,128,192,1920
-]);
-
-const SL = snapDivs.map(v => `${v}`);
 const CVS=['linear','ease_in','ease_out','ease_inout','slam'];
-const HITSOUND_GAIN = 0.22;
+const DEFAULT_DIVS=[4,8,12,16,24,32,48,64,96,128,192,1920];
+
 let _n=0; const uid=()=>++_n;
 const mkC=()=>({meta:{title:'',artist:'',effector:'',difficulty:'extended',level:1,bpm:120,music:'',offset:0},notes:[],lasers:{L:[],R:[]}});
 const s2=(v,s)=>Math.round(v/s)*s;
-const p2k=(p)=>KL[Math.round(Math.max(0,Math.min(1,p))*50)];
-const k2p=(c)=>{const i=KL.indexOf(c);return i>=0?i/50:-1;};
-const hBT=(cx)=>{for(let i=0;i<BT.length;i++)if(cx>=BT[i].x&&cx<BT[i].x+BT[i].w)return i;return -1;};
-const hFX=(cx)=>{if(cx>=LN.fl.x&&cx<LN.fl.x+LN.fl.w)return 0;if(cx>=LN.fr.x&&cx<LN.fr.x+LN.fr.w)return 1;return -1;};
-const hL=(cx)=>{
+const p2k=p=>KL[Math.round(Math.max(0,Math.min(1,p))*50)];
+const k2p=c=>{const i=KL.indexOf(c);return i>=0?i/50:-1;};
+const hBT=cx=>{for(let i=0;i<BT.length;i++)if(cx>=BT[i].x&&cx<BT[i].x+BT[i].w)return i;return -1;};
+const hFX=cx=>{if(cx>=LN.fl.x&&cx<LN.fl.x+LN.fl.w)return 0;if(cx>=LN.fr.x&&cx<LN.fr.x+LN.fr.w)return 1;return -1;};
+const hL=cx=>{
   if(cx>=LN.ll.x&&cx<LN.ll.x+LN.ll.w)return{s:'L',p:(cx-LN.ll.x)/LN.ll.w};
   if(cx>=LN.lr.x&&cx<LN.lr.x+LN.lr.w)return{s:'R',p:(cx-LN.lr.x)/LN.lr.w};
   return null;
 };
 
+function makeSynth(actx,freq,dur,noiseAmt=0.1){
+  const sr=actx.sampleRate,len=Math.ceil(sr*dur);
+  const buf=actx.createBuffer(1,len,sr);
+  const d=buf.getChannelData(0);
+  for(let i=0;i<len;i++){
+    const t=i/sr,env=Math.pow(Math.max(0,1-t/dur),2.5);
+    d[i]=env*(Math.sin(2*Math.PI*freq*t)*(1-noiseAmt)+(Math.random()*2-1)*noiseAmt)*0.4;
+  }
+  return buf;
+}
+
+// ── App component ──────────────────────────────────────────────────────────
 function App(){
+  // FIX 1: ALL useState calls must be INSIDE the component, never at module level
   const [tool,setTool]=useState(T.BTC);
-  const [si,setSi]=useState(3);
+  const [snapDivs,setSnapDivs]=useState(DEFAULT_DIVS);
+  const [si,setSi]=useState(3);           // index into snapDivs; default=16 divisions
   const [zoom,setZoom]=useState(1.0);
-  const [sb,setSb]=useState(0);
+  const [sb,setSb]=useState(0);           // beat value at the BOTTOM of the canvas
   const [chart,setChart]=useState(mkC);
   const [undoS,setUndoS]=useState([]);
   const [redoS,setRedoS]=useState([]);
@@ -79,55 +69,196 @@ function App(){
   const [panel,setPanel]=useState('chart');
   const [cw,setCw]=useState(600);
   const [ch,setCh]=useState(700);
-  const canR=useRef(null), ctrR=useRef(null);
-  const snap =
-    1 / snapDivs[si];
-  const PPB = PPB_BASE * zoom;
-  const TB = TOTAL_M * BPMEAS;
-  const b2y = useCallback(
-    b => (b - sb) * PPB,
-    [sb, PPB]
-  );
-  const y2b = useCallback(
-    y => sb + y / PPB,
-    [PPB, sb]
-  );
+  const [playing,setPlaying]=useState(false);     // FIX 5: was never declared
+  const [playbackRate,setPlaybackRate]=useState(1.0);
+  const [customDivInput,setCustomDivInput]=useState('');
+  const [musicLoaded,setMusicLoaded]=useState(false);
+
+  const canR=useRef(null),ctrR=useRef(null);
+  // FIX 5: audio refs that were referenced but never declared
+  const actxR=useRef(null);
+  const audioBufR=useRef(null);
+  const sourceR=useRef(null);
+  const rafR=useRef(null);
+  const playStartTimeR=useRef(0);
+  const playStartBeatR=useRef(0);
+  const playingR=useRef(false);
+  const sbR=useRef(0);
+  const bpmR=useRef(120);
+  const pbRateR=useRef(1.0);
+  const hitSetR=useRef(new Set());
+  const chartR=useRef(chart);
+  const btSndR=useRef(null);
+  const fxSndR=useRef(null);
+  const lSndR=useRef(null);
+  // FIX 6: use a ref for PPB so wheel handler reads latest value without re-registering
+  const PPBRef=useRef(PPB_BASE);
+
+  // Sync refs to state
+  useEffect(()=>{sbR.current=sb;},[sb]);
+  useEffect(()=>{bpmR.current=chart.meta.bpm;},[chart.meta.bpm]);
+  useEffect(()=>{pbRateR.current=playbackRate;},[playbackRate]);
+  useEffect(()=>{playingR.current=playing;},[playing]);
+  useEffect(()=>{chartR.current=chart;},[chart]);
+
+  const PPB=PPB_BASE*zoom;
+  const TB=TOTAL_M*BPMEAS;
+  // FIX 4: snap in beats = BPMEAS / division  (e.g. div=16 → 4/16 = 0.25 beats per snap)
+  const snap=BPMEAS/snapDivs[si];
+
+  useEffect(()=>{PPBRef.current=PPB;},[PPB]);
+
+  // FIX 2+3: b2y and y2b — higher beats are HIGHER on screen (lower y).
+  // Beat `sb` sits at y=ch (bottom). Beat `sb + ch/PPB` sits at y=0 (top).
+  const b2y=useCallback(b=>ch-(b-sb)*PPB,[sb,PPB,ch]);
+  const y2b=useCallback(y=>sb+(ch-y)/PPB,[PPB,sb,ch]);
   const gc=useCallback(e=>{const r=canR.current.getBoundingClientRect();return{cx:(e.clientX-r.left)*CANVAS_W/cw,y:e.clientY-r.top};},[cw]);
 
+  // Init AudioContext + synthetic hitsounds
+  useEffect(()=>{
+    const actx=new(window.AudioContext||window.webkitAudioContext)();
+    actxR.current=actx;
+    btSndR.current=makeSynth(actx,900,0.06,0.12);
+    fxSndR.current=makeSynth(actx,380,0.09,0.08);
+    lSndR.current=makeSynth(actx,1400,0.04,0.20);
+    return()=>actx.close();
+  },[]);
+
+  const playHit=useCallback((bufRef,vol=0.5)=>{
+    const actx=actxR.current;if(!actx||!bufRef.current)return;
+    if(actx.state==='suspended')actx.resume();
+    const s=actx.createBufferSource(),g=actx.createGain();
+    g.gain.value=vol;s.buffer=bufRef.current;
+    s.connect(g);g.connect(actx.destination);s.start();
+  },[]);
+
+  // Resize observer
   useEffect(()=>{
     if(!ctrR.current)return;
     const ro=new ResizeObserver(([e])=>{setCw(e.contentRect.width);setCh(e.contentRect.height);});
-    ro.observe(ctrR.current);
-    return()=>ro.disconnect();
+    ro.observe(ctrR.current);return()=>ro.disconnect();
   },[]);
 
-  useEffect(() => {
-    const canvas = canR.current;
-    if (!canvas) return;
-  
-    const wheelHandler = (e) => {
+  // FIX 6: Register wheel listener ONCE with {passive:false}. Read PPB via PPBRef.
+  // The old code had [onWheel] as a dep, causing re-registration on every zoom change.
+  useEffect(()=>{
+    const canvas=canR.current;if(!canvas)return;
+    const h=e=>{
       e.preventDefault();
-      onWheel(e);
+      if(e.shiftKey||e.ctrlKey){
+        // Ctrl/Shift + scroll = zoom
+        setZoom(z=>Math.max(0.15,Math.min(8,z*(e.deltaY>0?0.92:1.09))));
+      } else {
+        // Scroll down = go earlier in song (decrease sb), scroll up = go later
+        setSb(s=>Math.max(0,Math.min(TOTAL_M*BPMEAS,s-e.deltaY/PPBRef.current)));
+      }
     };
-  
-    canvas.addEventListener(
-      'wheel',
-      wheelHandler,
-      { passive: false }
-    );
-  
-    return () => {
-      canvas.removeEventListener(
-        'wheel',
-        wheelHandler
-      );
-    };
-  }, [onWheel]);
-  
+    canvas.addEventListener('wheel',h,{passive:false});
+    return()=>canvas.removeEventListener('wheel',h);
+  },[]); // empty deps: only uses refs
+
+  // Undo / redo
   const pushU=useCallback(c=>{setUndoS(u=>[...u.slice(-49),c]);setRedoS([]);},[]);
   const doUndo=useCallback(()=>{setUndoS(u=>{if(!u.length)return u;const p=u[u.length-1];setRedoS(r=>[chart,...r]);setChart(p);return u.slice(0,-1);});},[chart]);
   const doRedo=useCallback(()=>{setRedoS(r=>{if(!r.length)return r;const n=r[0];setUndoS(u=>[...u,chart]);setChart(n);return r.slice(1);});},[chart]);
 
+  // ── Playback ──────────────────────────────────────────────────────────────
+  const stopPlayback=useCallback(()=>{
+    playingR.current=false;
+    setPlaying(false);
+    if(rafR.current)cancelAnimationFrame(rafR.current);
+    if(sourceR.current){try{sourceR.current.stop();}catch(_){}}
+    sourceR.current=null;
+  },[]);
+
+  const startPlayback=useCallback(()=>{
+    const actx=actxR.current;if(!actx)return;
+    if(actx.state==='suspended')actx.resume();
+    const startBeat=sbR.current;
+    playStartBeatR.current=startBeat;
+    playStartTimeR.current=actx.currentTime;
+    playingR.current=true;
+    hitSetR.current=new Set();
+    setPlaying(true);
+    if(audioBufR.current){
+      if(sourceR.current){try{sourceR.current.stop();}catch(_){}}
+      const src=actx.createBufferSource();
+      src.buffer=audioBufR.current;
+      src.playbackRate.value=pbRateR.current;
+      src.connect(actx.destination);
+      const audioOff=Math.max(0,startBeat/(bpmR.current/60));
+      src.start(actx.currentTime,audioOff);
+      sourceR.current=src;
+      src.onended=()=>{if(playingR.current)stopPlayback();};
+    }
+    const tick=()=>{
+      if(!playingR.current)return;
+      const elapsed=(actx.currentTime-playStartTimeR.current)*pbRateR.current;
+      const curBeat=playStartBeatR.current+elapsed*(bpmR.current/60);
+      const tol=0.07*(bpmR.current/60);
+      const c=chartR.current;
+      c.notes.forEach(n=>{
+        if(hitSetR.current.has(n.id))return;
+        if(Math.abs(n.beat-curBeat)<tol){
+          hitSetR.current.add(n.id);
+          if(n.type==='bt_chip'||n.type==='bt_hold')playHit(btSndR,0.5);
+          else if(n.type==='fx_chip'||n.type==='fx_hold')playHit(fxSndR,0.55);
+        }
+      });
+      ['L','R'].forEach(s=>{
+        c.lasers[s].forEach(p=>{
+          const k=s+p.beat;
+          if(!hitSetR.current.has(k)&&Math.abs(p.beat-curBeat)<tol){
+            hitSetR.current.add(k);playHit(lSndR,0.35);
+          }
+        });
+      });
+      setSb(Math.max(0,curBeat-2));
+      if(curBeat<TB)rafR.current=requestAnimationFrame(tick);
+      else stopPlayback();
+    };
+    rafR.current=requestAnimationFrame(tick);
+  },[playHit,stopPlayback,TB]);
+
+  const togglePlay=useCallback(()=>{
+    if(playingR.current)stopPlayback();else startPlayback();
+  },[startPlayback,stopPlayback]);
+
+  // Music upload
+  const onMusicUpload=useCallback(async e=>{
+    const f=e.target.files[0];if(!f)return;
+    if(!actxR.current)actxR.current=new(window.AudioContext||window.webkitAudioContext)();
+    const arr=await f.arrayBuffer();
+    audioBufR.current=await actxR.current.decodeAudioData(arr);
+    setMusicLoaded(true);
+    setChart(p=>({...p,meta:{...p.meta,music:f.name}}));
+    e.target.value='';
+  },[]);
+
+  // Keyboard shortcuts
+  useEffect(()=>{
+    const h=e=>{
+      if(['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName))return;
+      if(e.code==='Space'){e.preventDefault();togglePlay();return;}
+      if(!e.ctrlKey&&!e.altKey&&!e.shiftKey){
+        const m={'1':T.SEL,'2':T.BTC,'3':T.BTH,'4':T.FXC,'5':T.FXH,'6':T.LL,'7':T.LR};
+        if(m[e.key]!==undefined){setTool(m[e.key]);return;}
+      }
+      if(e.ctrlKey&&!e.shiftKey){
+        if(e.key==='z'){doUndo();e.preventDefault();}
+        if(e.key==='y'){doRedo();e.preventDefault();}
+        const dm={'4':0,'8':1,'6':3};
+        if(dm[e.key]!==undefined){setSi(dm[e.key]);e.preventDefault();}
+      }
+      if(e.ctrlKey&&e.shiftKey){
+        const dm={'4':4,'2':5,'8':6};
+        if(dm[e.key]!==undefined){setSi(dm[e.key]);e.preventDefault();}
+      }
+    };
+    window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);
+  },[doUndo,doRedo,togglePlay]);
+
+  // ── Canvas draw ───────────────────────────────────────────────────────────
   useEffect(()=>{
     const canvas=canR.current;if(!canvas)return;
     const ctx=canvas.getContext('2d');
@@ -136,12 +267,14 @@ function App(){
     ctx.fillStyle='#0c0c18';ctx.fillRect(0,0,W,H);
     ctx.save();ctx.scale(sx,1);
 
+    // Lane backgrounds
     ctx.fillStyle='#0e0e1c';FX.forEach(l=>ctx.fillRect(l.x,0,l.w,H));
     ctx.fillStyle='#131326';BT.forEach(l=>ctx.fillRect(l.x,0,l.w,H));
     ctx.fillStyle='#091828';ctx.fillRect(LN.ll.x,0,LN.ll.w,H);
     ctx.fillStyle='#1e0808';ctx.fillRect(LN.lr.x,0,LN.lr.w,H);
     ctx.fillStyle='#07070f';ctx.fillRect(0,0,ML,H);
 
+    // Grid lines
     const lo=Math.floor(sb-0.5),hi=Math.ceil(sb+H/PPB+1);
     const tS=Math.floor(lo/snap),tE=Math.ceil(hi/snap)+1;
     for(let t=tS;t<=tE;t++){
@@ -151,168 +284,115 @@ function App(){
       ctx.strokeStyle=iM?'#424268':iB?'#252548':iH?'#1c1c38':'#131325';
       ctx.lineWidth=iM?1.5:0.5;
       ctx.beginPath();ctx.moveTo(ML,y);ctx.lineTo(CANVAS_W-3,y);ctx.stroke();
-      if (iM && b >= 0) { ctx.fillStyle = '#5566aa'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'right'; ctx.fillText(Math.round(b / BPMEAS) + 1, ML - 2, y - 4); ctx.textAlign = 'left'; }
+      // FIX 8: measure label at y+3.5 (below the line, since the line is the TOP of the measure)
+      if(iM&&b>=0){ctx.fillStyle='#5566aa';ctx.font='bold 9px monospace';ctx.textAlign='right';ctx.fillText(Math.round(b/BPMEAS)+1,ML-2,y+3.5);ctx.textAlign='left';}
     }
 
-    ctx.lineWidth=0.5;
-    ctx.strokeStyle='#1e1e3a';
-    [LN.a.x,LN.b.x,LN.c.x,LN.d.x,LN.d.x+LN.d.w,LN.ll.x+LN.ll.w,LN.lr.x].forEach(x=>{
-      ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();
-    });
+    // Lane dividers
+    ctx.lineWidth=0.5;ctx.strokeStyle='#1e1e3a';
+    [LN.a.x,LN.b.x,LN.c.x,LN.d.x,LN.d.x+LN.d.w,LN.ll.x+LN.ll.w,LN.lr.x].forEach(x=>{ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();});
     ctx.strokeStyle='#242450';ctx.lineWidth=1;
     [LN.b.x+LN.b.w,LN.c.x].forEach(x=>{ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();});
 
+    // Notes — BT chips/holds are orange; FX chips/holds are white
     chart.notes.forEach(n=>{
       const{type:tp,lane,beat}=n;
       if(tp==='bt_chip'){
         const l=BT[lane],y=b2y(beat);if(y<-12||y>H+12)return;
-        ctx.fillStyle='#ffdd00';ctx.fillRect(l.x+3,y-5,l.w-6,9);
-        ctx.strokeStyle='#ffee66';ctx.lineWidth=1;ctx.strokeRect(l.x+3,y-5,l.w-6,9);
+        ctx.fillStyle='#ff7700';ctx.fillRect(l.x+3,y-5,l.w-6,10);
+        ctx.strokeStyle='#ffaa44';ctx.lineWidth=1;ctx.strokeRect(l.x+3,y-5,l.w-6,10);
+        ctx.fillStyle='rgba(255,220,120,0.65)';ctx.fillRect(l.x+6,y-1.5,l.w-12,3);
       } else if(tp==='bt_hold'){
-        const l = BT[lane], ya = b2y(beat), yb = b2y(n.endBeat);
-        const yTop = Math.min(ya, yb), yH = Math.abs(ya - yb);
-        if (yTop > H + 12 || yTop + yH < -12) return;
-        ctx.fillStyle = 'rgba(255,210,0,0.28)'; ctx.fillRect(l.x + 8, yTop, l.w - 16, yH);
-        ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 1.5; ctx.strokeRect(l.x + 8, yTop, l.w - 16, yH);
-        ctx.fillStyle = '#ffdd00'; ctx.fillRect(l.x + 3, ya - 5, l.w - 6, 9); ctx.fillRect(l.x + 3, yb - 5, l.w - 6, 9);
+        const l=BT[lane],ya=b2y(beat),yb=b2y(n.endBeat);
+        // ya=start y, yb=end y. endBeat>beat so yb<ya (yb is higher on screen).
+        const yTop=Math.min(ya,yb),yHold=Math.abs(ya-yb);
+        if(yTop>H+12||yTop+yHold<-12)return;
+        ctx.fillStyle='rgba(255,100,0,0.28)';ctx.fillRect(l.x+8,yTop,l.w-16,yHold);
+        ctx.strokeStyle='#ff7700';ctx.lineWidth=1.5;ctx.strokeRect(l.x+8,yTop,l.w-16,yHold);
+        ctx.fillStyle='#ff7700';ctx.fillRect(l.x+3,ya-5,l.w-6,10);ctx.fillRect(l.x+3,yb-5,l.w-6,10);
+        ctx.fillStyle='rgba(255,220,120,0.65)';ctx.fillRect(l.x+6,ya-1.5,l.w-12,3);
       } else if(tp==='fx_chip'){
         const l=FX[lane],y=b2y(beat);if(y<-12||y>H+12)return;
         ctx.fillStyle='#f2f2ff';ctx.fillRect(l.x+2,y-7,l.w-4,14);
         ctx.strokeStyle='#ffffff';ctx.lineWidth=1;ctx.strokeRect(l.x+2,y-7,l.w-4,14);
+        ctx.fillStyle='rgba(160,160,220,0.5)';ctx.fillRect(l.x+8,y-2,l.w-16,4);
       } else if(tp==='fx_hold'){
-        const l = FX[lane], ya = b2y(beat), yb = b2y(n.endBeat);
-        const yTop = Math.min(ya, yb), yH = Math.abs(ya - yb);
-        if (yTop > H + 12 || yTop + yH < -12) return;
-        ctx.fillStyle = 'rgba(235,235,255,0.28)'; ctx.fillRect(l.x + 4, yTop, l.w - 8, yH);
-        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.strokeRect(l.x + 4, yTop, l.w - 8, yH)
-        ctx.fillStyle = '#ffffff'; ctx.fillRect(l.x + 2, ya - 6, l.w - 4, 12); ctx.fillRect(l.x + 2, yb - 6, l.w - 4, 12);
+        const l=FX[lane],ya=b2y(beat),yb=b2y(n.endBeat);
+        const yTop=Math.min(ya,yb),yHold=Math.abs(ya-yb);
+        if(yTop>H+12||yTop+yHold<-12)return;
+        ctx.fillStyle='rgba(235,235,255,0.22)';ctx.fillRect(l.x+4,yTop,l.w-8,yHold);
+        ctx.strokeStyle='#ffffff';ctx.lineWidth=1.5;ctx.strokeRect(l.x+4,yTop,l.w-8,yHold);
+        ctx.fillStyle='#f2f2ff';ctx.fillRect(l.x+2,ya-6,l.w-4,12);ctx.fillRect(l.x+2,yb-6,l.w-4,12);
+        ctx.fillStyle='rgba(160,160,220,0.5)';ctx.fillRect(l.x+8,ya-2,l.w-16,4);
       }
     });
 
-    const drawLaser = (pts, lc, col) => {
-      if (!pts.length) return;
-    
-      ctx.save();
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-    
-      const drawSegment = (x1, y1, x2, y2, curve) => {
-        // glow
-        ctx.strokeStyle = col;
-        ctx.globalAlpha = 0.18;
-        ctx.lineWidth = 18;
-    
-        ctx.beginPath();
-    
-        if (curve === 'linear') {
-          ctx.moveTo(x1, y1);
-          ctx.lineTo(x2, y2);
-        } else {
-          ctx.moveTo(x1, y1);
-          ctx.bezierCurveTo(
-            x1,
-            y1 + (y2-y1)*0.35,
-            x2,
-            y1 + (y2-y1)*0.65,
-            x2,
-            y2
-          );
-        }
-    
-        ctx.stroke();
-    
-        // body
-        ctx.globalAlpha = 1;
-        ctx.lineWidth = 10;
-    
-        ctx.beginPath();
-    
-        if (curve === 'linear') {
-          ctx.moveTo(x1, y1);
-          ctx.lineTo(x2, y2);
-        } else {
-          ctx.moveTo(x1, y1);
-          ctx.bezierCurveTo(
-            x1,
-            y1 + (y2-y1)*0.35,
-            x2,
-            y1 + (y2-y1)*0.65,
-            x2,
-            y2
-          );
-        }
-    
-        ctx.stroke();
-    
-        // highlight
-        ctx.strokeStyle = '#ffffff';
-        ctx.globalAlpha = 0.35;
-        ctx.lineWidth = 3;
-    
-        ctx.beginPath();
-    
-        if (curve === 'linear') {
-          ctx.moveTo(x1, y1);
-          ctx.lineTo(x2, y2);
-        } else {
-          ctx.moveTo(x1, y1);
-          ctx.bezierCurveTo(
-            x1,
-            y1 + (y2-y1)*0.35,
-            x2,
-            y1 + (y2-y1)*0.65,
-            x2,
-            y2
-          );
-        }
-    
-        ctx.stroke();
-      };
-    
-      for (let i = 0; i < pts.length - 1; i++) {
-        const p1 = pts[i];
-        const p2 = pts[i + 1];
-    
-        const x1 = lc.x + p1.pos * lc.w;
-        const x2 = lc.x + p2.pos * lc.w;
-    
-        const y1 = b2y(p1.beat);
-        const y2 = b2y(p2.beat);
-    
-        drawSegment(
-          x1,
-          y1,
-          x2,
-          y2,
-          p1.curveType
-        );
+    // Lasers: 3-pass (glow → body → highlight) with dots at control points
+    const drawLaser=(pts,lc,col)=>{
+      if(!pts.length)return;
+      ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
+      for(let i=0;i<pts.length-1;i++){
+        const p1=pts[i],p2=pts[i+1];
+        const x1=lc.x+p1.pos*lc.w,x2=lc.x+p2.pos*lc.w;
+        const y1=b2y(p1.beat),y2=b2y(p2.beat);
+        if(Math.max(y1,y2)<-8||Math.min(y1,y2)>H+8)continue;
+        const tracePath=()=>{
+          ctx.beginPath();
+          if(p1.curveType==='slam'){
+            ctx.moveTo(x1,y1);ctx.lineTo(x2,y1+1);ctx.moveTo(x2,y1+1);ctx.lineTo(x2,y2);
+          } else if(!p1.curveType||p1.curveType==='linear'){
+            ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);
+          } else {
+            const dy=y2-y1;let cy1,cy2;
+            if(p1.curveType==='ease_in'){cy1=y1+dy*0.85;cy2=y1+dy*0.95;}
+            else if(p1.curveType==='ease_out'){cy1=y1+dy*0.05;cy2=y1+dy*0.15;}
+            else{cy1=y1+dy*0.35;cy2=y1+dy*0.65;}
+            ctx.moveTo(x1,y1);ctx.bezierCurveTo(x1,cy1,x2,cy2,x2,y2);
+          }
+          ctx.stroke();
+        };
+        ctx.strokeStyle=col;ctx.globalAlpha=0.18;ctx.lineWidth=18;tracePath();
+        ctx.globalAlpha=1;ctx.lineWidth=10;ctx.strokeStyle=col;tracePath();
+        ctx.strokeStyle='rgba(255,255,255,0.35)';ctx.lineWidth=3;tracePath();
       }
-    
+      pts.forEach(p=>{
+        const y=b2y(p.beat);if(y<-8||y>H+8)return;
+        const x=lc.x+p.pos*lc.w;
+        ctx.globalAlpha=1;ctx.fillStyle=col;ctx.beginPath();ctx.arc(x,y,6,0,Math.PI*2);ctx.fill();
+        ctx.fillStyle='rgba(255,255,255,0.65)';ctx.beginPath();ctx.arc(x,y,2.5,0,Math.PI*2);ctx.fill();
+      });
       ctx.restore();
     };
     drawLaser(chart.lasers.L,LN.ll,'#22ccff');
-    drawLaser(chart.lasers.R,LN.lr,'#ff2222');
+    drawLaser(chart.lasers.R,LN.lr,'#ff3333');
 
+    // FIX 7: drag ghost height = b2y(bMin) - b2y(bMax) because bMax is higher on screen (lower y)
     if(drag?.currentBeat!=null){
       const bMin=Math.min(drag.sb,drag.currentBeat),bMax=Math.max(drag.sb,drag.currentBeat);
-      const yTop=b2y(bMax),yBot=b2y(bMin),yH=Math.max(0,yBot-yTop);
-      if(drag.type==='bth'){const l=BT[drag.idx];ctx.fillStyle='rgba(255,210,0,0.1)';ctx.strokeStyle='rgba(255,210,0,0.35)';ctx.lineWidth=1;ctx.fillRect(l.x+8,yTop,l.w-16,yH);ctx.strokeRect(l.x+8,yTop,l.w-16,yH);}
-      if(drag.type==='fxh'){const l=FX[drag.idx];ctx.fillStyle='rgba(235,235,255,0.1)';ctx.strokeStyle='rgba(255,255,255,0.35)';ctx.lineWidth=1;ctx.fillRect(l.x+4,yTop,l.w-8,yH);ctx.strokeRect(l.x+4,yTop,l.w-8,yH);}
+      const yTop=b2y(bMax),yHold=Math.max(0,b2y(bMin)-b2y(bMax));
+      if(drag.type==='bth'){const l=BT[drag.idx];ctx.fillStyle='rgba(255,100,0,0.12)';ctx.strokeStyle='rgba(255,100,0,0.4)';ctx.lineWidth=1;ctx.fillRect(l.x+8,yTop,l.w-16,yHold);ctx.strokeRect(l.x+8,yTop,l.w-16,yHold);}
+      if(drag.type==='fxh'){const l=FX[drag.idx];ctx.fillStyle='rgba(235,235,255,0.1)';ctx.strokeStyle='rgba(235,235,255,0.35)';ctx.lineWidth=1;ctx.fillRect(l.x+4,yTop,l.w-8,yHold);ctx.strokeRect(l.x+4,yTop,l.w-8,yHold);}
     }
 
+    // Cursor line
     const cy=b2y(cur);
     if(cy>=18&&cy<=H){ctx.strokeStyle='rgba(255,255,255,0.1)';ctx.lineWidth=1;ctx.setLineDash([3,7]);ctx.beginPath();ctx.moveTo(ML,cy);ctx.lineTo(CANVAS_W,cy);ctx.stroke();ctx.setLineDash([]);}
 
+    // Header strip
     ctx.fillStyle='rgba(12,12,24,0.92)';ctx.fillRect(0,0,CANVAS_W,18);
     ctx.textAlign='center';ctx.font='bold 8px monospace';
-    [['L',LN.ll,'#22ccff'],['A',LN.a,'#556688'],['B',LN.b,'#556688'],['C',LN.c,'#556688'],['D',LN.d,'#556688'],['R',LN.lr,'#ff2222']].forEach(([lb,lc,co])=>{ctx.fillStyle=co;ctx.fillText(lb,lc.x+lc.w/2,12);});
+    [['L',LN.ll,'#22ccff'],['A',LN.a,'#556688'],['B',LN.b,'#556688'],['C',LN.c,'#556688'],['D',LN.d,'#556688'],['R',LN.lr,'#ff3333']].forEach(([lb,lc,co])=>{ctx.fillStyle=co;ctx.fillText(lb,lc.x+lc.w/2,12);});
     ctx.fillStyle='#442200';ctx.font='7px monospace';
     ctx.fillText('FX-L',LN.fl.x+LN.fl.w/2,12);ctx.fillText('FX-R',LN.fr.x+LN.fr.w/2,12);
-    ctx.textAlign='left';
-    ctx.restore();
+    ctx.textAlign='left';ctx.restore();
   },[chart,sb,PPB,cw,ch,b2y,snap,drag,cur]);
 
-  const onMove=useCallback(e=>{const{cx,y}=gc(e);setCur(s2(y2b(y),snap));if(drag)setDrag(d=>d?{...d,currentBeat:s2(y2b(y),snap)}:null);},[gc,y2b,snap,drag]);
+  // ── Mouse handlers ────────────────────────────────────────────────────────
+  const onMove=useCallback(e=>{
+    const{cx,y}=gc(e);
+    setCur(s2(y2b(y),snap));
+    if(drag)setDrag(d=>d?{...d,currentBeat:s2(y2b(y),snap)}:null);
+  },[gc,y2b,snap,drag]);
 
   const onDown=useCallback(e=>{
     e.preventDefault();
@@ -328,158 +408,50 @@ function App(){
           return true;
         }),
         lasers:{L:li?.s==='L'?p.lasers.L.filter(pt=>Math.abs(pt.beat-b)>=eps):p.lasers.L,R:li?.s==='R'?p.lasers.R.filter(pt=>Math.abs(pt.beat-b)>=eps):p.lasers.R}
-      }));
-      return;
+      }));return;
     }
     if(e.button!==0)return;
     pushU(chart);
-    if(tool===T.BTC&&bi>=0){setChart(p=>({...p,notes:[...p.notes.filter(n=>!(n.type==='bt_chip'&&n.lane===bi&&Math.abs(n.beat-b)<eps)),{id:uid(),type:'bt_chip',lane:bi,beat:b}]}));}
-    else if(tool===T.BTH&&bi>=0){setDrag({type:'bth',idx:bi,sb:b,currentBeat:b});}
-    else if(tool===T.FXC&&fi>=0){setChart(p=>({...p,notes:[...p.notes.filter(n=>!(n.type==='fx_chip'&&n.lane===fi&&Math.abs(n.beat-b)<eps)),{id:uid(),type:'fx_chip',lane:fi,beat:b}]}));}
-    else if(tool===T.FXH&&fi>=0){setDrag({type:'fxh',idx:fi,sb:b,currentBeat:b});}
-    else if (tool === T.LL && li?.s === 'L') { const pos = Math.max(0, Math.min(1, li.p)); setChart(p => ({ ...p, lasers: { ...p.lasers, L: [...p.lasers.L.filter(pt => Math.abs(pt.beat - b) >= eps), { beat: b, pos, curveType: cv }].sort((p1, p2) => p1.beat - p2.beat) } })); }
-    else if (tool === T.LR && li?.s === 'R') { const pos = Math.max(0, Math.min(1, li.p)); setChart(p => ({ ...p, lasers: { ...p.lasers, R: [...p.lasers.R.filter(pt => Math.abs(pt.beat - b) >= eps), { beat: b, pos, curveType: cv }].sort((p1, p2) => p1.beat - p2.beat) } })); }
-  },[gc,y2b,snap,tool,chart,pushU,cv]);
+    if(tool===T.BTC&&bi>=0){
+      playHit(btSndR,0.45);
+      setChart(p=>({...p,notes:[...p.notes.filter(n=>!(n.type==='bt_chip'&&n.lane===bi&&Math.abs(n.beat-b)<eps)),{id:uid(),type:'bt_chip',lane:bi,beat:b}]}));
+    } else if(tool===T.BTH&&bi>=0){
+      setDrag({type:'bth',idx:bi,sb:b,currentBeat:b});
+    } else if(tool===T.FXC&&fi>=0){
+      playHit(fxSndR,0.45);
+      setChart(p=>({...p,notes:[...p.notes.filter(n=>!(n.type==='fx_chip'&&n.lane===fi&&Math.abs(n.beat-b)<eps)),{id:uid(),type:'fx_chip',lane:fi,beat:b}]}));
+    } else if(tool===T.FXH&&fi>=0){
+      setDrag({type:'fxh',idx:fi,sb:b,currentBeat:b});
+    } else if(tool===T.LL&&li?.s==='L'){
+      const pos=Math.max(0,Math.min(1,li.p));
+      setChart(p=>({...p,lasers:{...p.lasers,L:[...p.lasers.L.filter(pt=>Math.abs(pt.beat-b)>=eps),{beat:b,pos,curveType:cv}].sort((a,c2)=>a.beat-c2.beat)}}));
+    } else if(tool===T.LR&&li?.s==='R'){
+      const pos=Math.max(0,Math.min(1,li.p));
+      setChart(p=>({...p,lasers:{...p.lasers,R:[...p.lasers.R.filter(pt=>Math.abs(pt.beat-b)>=eps),{beat:b,pos,curveType:cv}].sort((a,c2)=>a.beat-c2.beat)}}));
+    }
+  },[gc,y2b,snap,tool,chart,pushU,cv,playHit]);
 
   const onUp=useCallback(e=>{
     if(!drag)return;
     const{y}=gc(e);const b=s2(y2b(y),snap);
     const st=Math.min(drag.sb,b),en=Math.max(drag.sb,b);
     if(en-st>=snap*0.9){
-      if(drag.type==='bth')setChart(p=>({...p,notes:[...p.notes,{id:uid(),type:'bt_hold',lane:drag.idx,beat:st,endBeat:en}]}));
-      if(drag.type==='fxh')setChart(p=>({...p,notes:[...p.notes,{id:uid(),type:'fx_hold',lane:drag.idx,beat:st,endBeat:en}]}));
+      if(drag.type==='bth'){playHit(btSndR,0.4);setChart(p=>({...p,notes:[...p.notes,{id:uid(),type:'bt_hold',lane:drag.idx,beat:st,endBeat:en}]}));}
+      if(drag.type==='fxh'){playHit(fxSndR,0.4);setChart(p=>({...p,notes:[...p.notes,{id:uid(),type:'fx_hold',lane:drag.idx,beat:st,endBeat:en}]}));}
     }
     setDrag(null);
-  },[drag,gc,y2b,snap]);
+  },[drag,gc,y2b,snap,playHit]);
 
-  const onWheel = useCallback((e) => {
-    e.preventDefault();
-  
-    // shift+scroll OR ctrl+scroll = zoom
-    if (e.shiftKey || e.ctrlKey) {
-      setZoom(z =>
-        Math.max(
-          0.15,
-          Math.min(
-            8,
-            z * (e.deltaY > 0 ? 0.92 : 1.08)
-          )
-        )
-      );
-      return;
-    }
-  
-    // FIXED DIRECTION
-    // wheel down -> timeline down
-    // wheel up -> timeline up
-    setSb(s =>
-      Math.max(
-        0,
-        Math.min(
-          TB,
-          s - e.deltaY / PPB
-        )
-      )
-    );
-  }, [PPB, TB]);
-
-  useEffect(()=>{
-    const h=e=>{
-      if(['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName))return;
-      if(!e.ctrlKey&&!e.altKey&&!e.shiftKey){
-        const m={'1':T.SEL,'2':T.BTC,'3':T.BTH,'4':T.FXC,'5':T.FXH,'6':T.LL,'7':T.LR,'h':T.BTC,'j':T.BTH,'k':T.FXC,'l':T.FXH,'q':T.LL,'w':T.LR};
-        if(m[e.key]!==undefined){setTool(m[e.key]);return;}
-      }
-      if(e.ctrlKey&&!e.shiftKey){if(e.key==='z'){doUndo();e.preventDefault();}if(e.key==='y'){doRedo();e.preventDefault();}const m={'4':0,'8':1,'6':3};if(m[e.key]!==undefined){setSi(m[e.key]);e.preventDefault();}}
-      if(e.ctrlKey&&e.shiftKey){const m={'4':4,'2':5,'8':6};if(m[e.key]!==undefined){setSi(m[e.key]);e.preventDefault();}}
-    };
-    window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);
-  },[doUndo,doRedo]);
-
-  useEffect(() => {
-    const h = async (e) => {
-      if (e.code !== 'Space') return;
-  
-      e.preventDefault();
-  
-      if (!audioCtxR.current) {
-        audioCtxR.current = new AudioContext();
-      }
-  
-      if (!audioBufferR.current) return;
-  
-      if (playing) {
-        sourceR.current?.stop();
-        setPlaying(false);
-        return;
-      }
-  
-      const src =
-        audioCtxR.current.createBufferSource();
-  
-      src.buffer = audioBufferR.current;
-      src.playbackRate.value = playbackRate;
-  
-      src.connect(
-        audioCtxR.current.destination
-      );
-  
-      sourceR.current = src;
-  
-      const started =
-        audioCtxR.current.currentTime;
-  
-      src.start(0, songTime);
-  
-      setPlaying(true);
-  
-      const update = () => {
-        const t =
-          songTime +
-          (
-            audioCtxR.current.currentTime -
-            started
-          ) *
-          playbackRate;
-  
-        setSb(
-          (t * chart.meta.bpm) / 60
-        );
-  
-        if (sourceR.current === src) {
-          requestAnimationFrame(update);
-        }
-      };
-  
-      requestAnimationFrame(update);
-  
-      src.onended = () => {
-        if (sourceR.current === src) {
-          setPlaying(false);
-        }
-      };
-    };
-  
-    window.addEventListener(
-      'keydown',
-      h
-    );
-  
-    return () =>
-      window.removeEventListener(
-        'keydown',
-        h
-      );
-  }, [
-    playing,
-    playbackRate,
-    songTime,
-    chart.meta.bpm
-  ]);
-  
+  // ── Export KSH ────────────────────────────────────────────────────────────
+  // FIX 9: FX holds now export '1' (ver=160 format), not legacy 'S'. Added ver=160 header.
   const exportKSH=useCallback(()=>{
     const m=chart.meta,TPB=48,TPM=BPMEAS*TPB;
-    const lines=[`title=${m.title}`,`artist=${m.artist}`,`effect=${m.effector||''}`,`jacket=jacket.jpg`,`difficulty=${m.difficulty}`,`level=${m.level}`,`t=${m.bpm}`,`m=${m.music||'audio.ogg'}`,`mvol=90`,`o=${m.offset}`,`bg=desert`,`layer=arrow`,`po=0`,`plength=15000`,`--`,`beat=4/4`];
+    const lines=[
+      `title=${m.title}`,`artist=${m.artist}`,`effect=${m.effector||''}`,
+      `jacket=jacket.jpg`,`difficulty=${m.difficulty}`,`level=${m.level}`,
+      `t=${m.bpm}`,`m=${m.music||'audio.ogg'}`,`mvol=90`,`o=${m.offset}`,
+      `bg=desert`,`layer=arrow`,`po=0`,`plength=15000`,`ver=160`,`--`,`beat=4/4`
+    ];
     for(let ms=0;ms<TOTAL_M;ms++){
       for(let t=0;t<TPM;t++){
         const beat=Math.round((ms*BPMEAS+t/TPB)*TPB)/TPB,eps=0.4/TPB;
@@ -488,98 +460,152 @@ function App(){
           if(n.type==='bt_chip'&&Math.abs(n.beat-beat)<eps)bt[n.lane]='1';
           if(n.type==='bt_hold'&&beat>=n.beat-eps&&beat<=n.endBeat+eps)bt[n.lane]='2';
           if(n.type==='fx_chip'&&Math.abs(n.beat-beat)<eps)fx[n.lane]='2';
-          if(n.type==='fx_hold'&&beat>=n.beat-eps&&beat<=n.endBeat+eps)fx[n.lane]='S';
+          // FIX 9: use '1' for long FX (ver=160), not 'S' (legacy pre-1.60)
+          if(n.type==='fx_hold'&&beat>=n.beat-eps&&beat<=n.endBeat+eps)fx[n.lane]='1';
         });
-        ['L','R'].forEach((s,si)=>{const pts=chart.lasers[s];const ap=pts.find(p=>Math.abs(p.beat-beat)<eps);if(ap){ls[si]=p2k(ap.pos);}else{for(let i=0;i<pts.length-1;i++){if(beat>pts[i].beat+eps&&beat<pts[i+1].beat-eps){ls[si]=':';break;}}}});
+        ['L','R'].forEach((s,si2)=>{
+          const pts=chart.lasers[s];
+          const ap=pts.find(p=>Math.abs(p.beat-beat)<eps);
+          if(ap){ls[si2]=p2k(ap.pos);}
+          else{for(let i=0;i<pts.length-1;i++){if(beat>pts[i].beat+eps&&beat<pts[i+1].beat-eps){ls[si2]=':';break;}}}
+        });
         lines.push(`${bt.join('')}|${fx.join('')}|${ls.join('')}`);
       }
       lines.push('--');
     }
-    const blob=new Blob([lines.join('\n')],{type:'text/plain'}),url=URL.createObjectURL(blob);
+    const url=URL.createObjectURL(new Blob([lines.join('\n')],{type:'text/plain'}));
     Object.assign(document.createElement('a'),{href:url,download:`${m.title||'chart'}.ksh`}).click();
     URL.revokeObjectURL(url);
   },[chart]);
 
+  // ── Import KSH ────────────────────────────────────────────────────────────
+  // FIX 10: BT hold closes on c!=='2' (not just '0'); FX hold closes on !isLong
   const importKSH=useCallback(e=>{
     const f=e.target.files[0];if(!f)return;
     const fr=new FileReader();
     fr.onload=ev=>{
       const lines=ev.target.result.split(/\r?\n/).map(l=>l.trim());
-      const meta={},notes=[],lasers={L:[],R:[]},btH=[null,null,null,null],fxH=[null,null];
-      let inD=false,ms=0,rows=[];
+      const meta={},notes=[],lasers={L:[],R:[]};
+      const btH=[null,null,null,null],fxH=[null,null];
+      let inBody=false,ms=0,rows=[];
       for(const line of lines){
-        if(!inD){if(line==='--'){inD=true;continue;}const ei=line.indexOf('=');if(ei>0)meta[line.slice(0,ei)]=line.slice(ei+1);}
-        else{
+        if(!inBody){
+          if(line==='--'){inBody=true;continue;}
+          const ei=line.indexOf('=');if(ei>0)meta[line.slice(0,ei)]=line.slice(ei+1);
+        } else {
           if(line==='--'){
             const n=rows.length;
             rows.forEach((row,idx)=>{
               const beat=Math.round((ms*BPMEAS+idx*BPMEAS/n)*1000)/1000;
-              const[bs,fs,ls]=row.split('|');if(!bs||!fs||!ls)return;
-              for(let i=0;i<4;i++){const c=bs[i]||'0';if(c==='1')notes.push({id:uid(),type:'bt_chip',lane:i,beat});if(c==='2'&&btH[i]==null)btH[i]=beat;if(c==='0'&&btH[i]!=null){notes.push({id:uid(),type:'bt_hold',lane:i,beat:btH[i],endBeat:beat});btH[i]=null;}}
-              for(let i=0;i<2;i++){const c=fs[i]||'0';if(c==='2')notes.push({id:uid(),type:'fx_chip',lane:i,beat});if(c!=='0'&&c!=='2'&&c!=='-'&&fxH[i]==null)fxH[i]=beat;if((c==='0'||c==='-')&&fxH[i]!=null){notes.push({id:uid(),type:'fx_hold',lane:i,beat:fxH[i],endBeat:beat});fxH[i]=null;}}
-              ['L','R'].forEach((s,si)=>{const c=ls[si];if(c&&c!=='-'&&c!==':'){const p=k2p(c);if(p>=0)lasers[s].push({beat,pos:p,curveType:'linear'});}});
+              const parts=row.split('|');
+              const bs=parts[0]||'',fs=parts[1]||'',ls=parts[2]||'';
+              // BT lanes
+              for(let i=0;i<4;i++){
+                const c=bs[i]||'0';
+                if(c==='1')notes.push({id:uid(),type:'bt_chip',lane:i,beat});
+                // FIX 10: hold starts on '2'; closes on anything that is NOT '2'
+                if(c==='2'&&btH[i]==null)btH[i]=beat;
+                if(c!=='2'&&btH[i]!=null){notes.push({id:uid(),type:'bt_hold',lane:i,beat:btH[i],endBeat:beat});btH[i]=null;}
+              }
+              // FX lanes
+              for(let i=0;i<2;i++){
+                const c=fs[i]||'0';
+                if(c==='2')notes.push({id:uid(),type:'fx_chip',lane:i,beat});
+                // Long FX: '1' (ver≥160) OR legacy letter codes (S,V,T,W,U,G,H,K,I,L,J,F,P,B,Q,X,A,D)
+                const isLong=c!=='0'&&c!=='2'&&c!=='-';
+                if(isLong&&fxH[i]==null)fxH[i]=beat;
+                // FIX 10: close hold when isLong goes false
+                if(!isLong&&fxH[i]!=null){notes.push({id:uid(),type:'fx_hold',lane:i,beat:fxH[i],endBeat:beat});fxH[i]=null;}
+              }
+              // Laser lanes
+              ['L','R'].forEach((s,si2)=>{
+                const c=ls[si2];
+                if(c&&c!=='-'&&c!==':'){const p=k2p(c);if(p>=0)lasers[s].push({beat,pos:p,curveType:'linear'});}
+              });
             });
+            // Close any still-open holds at end of measure
+            for(let i=0;i<4;i++){if(btH[i]!=null){/* leave open, continues next measure */}}
             ms++;rows=[];
-          } else if(line&&!line.startsWith('//')&&!line.startsWith('#')&&line.includes('|')){rows.push(line);}
+          } else if(line&&!line.startsWith('//')&&!line.startsWith('#')&&line.includes('|')){
+            rows.push(line);
+          }
         }
       }
-      setChart({meta:{title:meta.title||'',artist:meta.artist||'',effector:meta.effect||'',difficulty:meta.difficulty||'extended',level:parseInt(meta.level)||1,bpm:parseFloat(meta.t)||120,music:meta.m||'',offset:parseInt(meta.o)||0},notes,lasers});
+      setChart({
+        meta:{title:meta.title||'',artist:meta.artist||'',effector:meta.effect||'',difficulty:meta.difficulty||'extended',level:parseInt(meta.level)||1,bpm:parseFloat(meta.t)||120,music:meta.m||'',offset:parseInt(meta.o)||0},
+        notes,lasers
+      });
       setUndoS([]);setRedoS([]);
     };
     fr.readAsText(f);e.target.value='';
   },[]);
 
-  const tls=[{id:T.SEL,n:'Select',k:'1',c:'#778899'},{id:T.BTC,n:'BT Chip',k:'2/H',c:'#ffdd00'},{id:T.BTH,n:'BT Hold',k:'3/J',c:'#ffaa00'},{id:T.FXC,n:'FX Chip',k:'4/K',c:'#ffffff'},{id:T.FXH,n:'FX Hold',k:'5/L',c:'#ffffff'},{id:T.LL,n:'Left Laser',k:'6/Q',c:'#22ccff'},{id:T.LR,n:'Right Laser',k:'7/W',c:'#ff2222'}];
-  const ct=tls.find(t=>t.id===tool),cM=Math.floor(cur/BPMEAS)+1,cB=Math.floor(cur%BPMEAS)+1;
-
-  const Bs=(a,c)=>({background:a?'#12122e':'#0b0b1c',border:`1px solid ${a?c||'#3344bb':'#1a1a30'}`,color:a?c||'#8899ee':'#445566',padding:'3px 7px',cursor:'pointer',fontSize:10,fontFamily:'monospace',borderRadius:2});
+  // ── Style helpers ──────────────────────────────────────────────────────────
+  const Bs=(a,c)=>({background:a?'#12122e':'#0b0b1c',border:`1px solid ${a?c||'#3344bb':'#1a1a30'}`,color:a?c||'#8899ee':'#445566',padding:'3px 7px',cursor:'pointer',fontSize:10,fontFamily:'monospace',borderRadius:2,flexShrink:0});
   const INP={background:'#080810',border:'1px solid #171728',color:'#99aabb',padding:'3px 6px',fontSize:11,width:'100%',boxSizing:'border-box',fontFamily:'monospace'};
   const SEL={background:'#080810',border:'1px solid #171728',color:'#99aabb',padding:'3px 5px',fontSize:10,fontFamily:'monospace'};
   const LBL={fontSize:8,color:'#3a4a5a',textTransform:'uppercase',letterSpacing:1};
 
+  const tls=[
+    {id:T.SEL,n:'Select',k:'1',c:'#778899'},
+    {id:T.BTC,n:'BT Chip',k:'2',c:'#ff7700'},
+    {id:T.BTH,n:'BT Hold',k:'3',c:'#ffaa00'},
+    {id:T.FXC,n:'FX Chip',k:'4',c:'#f2f2ff'},
+    {id:T.FXH,n:'FX Hold',k:'5',c:'#ddddff'},
+    {id:T.LL,n:'Left Laser',k:'6',c:'#22ccff'},
+    {id:T.LR,n:'Right Laser',k:'7',c:'#ff3333'}
+  ];
+  const ct=tls.find(t=>t.id===tool);
+  const cM=Math.floor(cur/BPMEAS)+1,cB=Math.floor(cur%BPMEAS)+1;
+
+  const addCustomDiv=()=>{
+    const v=parseInt(customDivInput);
+    if(isNaN(v)||v<1||v>1920)return;
+    if(snapDivs.includes(v)){setSi(snapDivs.indexOf(v));}
+    else{const nd=[...snapDivs,v].sort((a,b)=>a-b);setSnapDivs(nd);setSi(nd.indexOf(v));}
+    setCustomDivInput('');
+  };
+
   return(
     <div style={{display:'flex',flexDirection:'column',height:'100vh',background:'#08080f',color:'#99aabb',fontFamily:'monospace',fontSize:11,userSelect:'none',overflow:'hidden'}}>
-      <div style={{height:42,background:'#0a0a1c',borderBottom:'1px solid #181830',display:'flex',alignItems:'center',gap:5,padding:'0 8px',flexShrink:0}}>
-        <label style={{...Bs(false),cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
-          <i className="ti ti-folder-open" aria-hidden="true"/>Open .ksh
+
+      {/* ── Toolbar ── */}
+      <div style={{height:42,background:'#0a0a1c',borderBottom:'1px solid #181830',display:'flex',alignItems:'center',gap:4,padding:'0 8px',flexShrink:0,overflowX:'auto'}}>
+        <label style={{...Bs(false),cursor:'pointer',display:'flex',alignItems:'center',gap:3}}>
+          <i className="ti ti-folder-open"/>Open .ksh
           <input type="file" accept=".ksh" onChange={importKSH} style={{display:'none'}}/>
         </label>
-        <button onClick={exportKSH} style={{...Bs(false),display:'flex',alignItems:'center',gap:4}}>
-          <i className="ti ti-device-floppy" aria-hidden="true"/>Export .ksh
+        <button onClick={exportKSH} style={{...Bs(false),display:'flex',alignItems:'center',gap:3}}>
+          <i className="ti ti-device-floppy"/>Export .ksh
         </button>
-        <div style={{width:1,height:24,background:'#181830',flexShrink:0}}/>
+        <label style={{...Bs(musicLoaded,'#44cc88'),cursor:'pointer',display:'flex',alignItems:'center',gap:3,maxWidth:130,overflow:'hidden'}}>
+          <i className="ti ti-music"/>
+          <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:9}}>{musicLoaded?chart.meta.music:'Load Music'}</span>
+          <input type="file" accept="audio/*" onChange={onMusicUpload} style={{display:'none'}}/>
+        </label>
+        <div style={{width:1,height:24,background:'#181830'}}/>
+        <button onClick={togglePlay} style={{...Bs(playing,'#22ee88'),display:'flex',alignItems:'center',gap:3}}>
+          {playing?'⏹ Stop':'▶ Play'}
+        </button>
+        {[0.25,0.5,0.75,1].map(v=>(
+          <button key={v} onClick={()=>{setPlaybackRate(v);pbRateR.current=v;}} style={Bs(playbackRate===v,'#88ddaa')}>{v}x</button>
+        ))}
+        <div style={{width:1,height:24,background:'#181830'}}/>
         {tls.map(t=>(
-          <button key={t.id} onClick={()=>setTool(t.id)} title={`${t.n} [${t.k}]`} style={{...Bs(tool===t.id,t.c),padding:'3px 6px'}}>
+          <button key={t.id} onClick={()=>setTool(t.id)} title={`${t.n} [${t.k}]`} style={{...Bs(tool===t.id,t.c),padding:'3px 5px'}}>
             <span style={{color:tool===t.id?t.c:'#445566'}}>{t.n}</span>
           </button>
         ))}
-        <div style={{width:1,height:24,background:'#181830',flexShrink:0}}/>
-        <span style={{color:'#334455',fontSize:9}}>ZOOM</span>
-        <button onClick={()=>setZoom(z=>Math.max(0.2,z-0.25))} style={{...Bs(false),padding:'2px 5px'}}>−</button>
-        <span style={{color:'#556677',fontSize:9,minWidth:32,textAlign:'center'}}>{Math.round(zoom*100)}%</span>
-        <button onClick={()=>setZoom(z=>Math.min(5,z+0.25))} style={{...Bs(false),padding:'2px 5px'}}>+</button>
+        <div style={{width:1,height:24,background:'#181830'}}/>
         <span style={{color:'#334455',fontSize:9}}>CURVE</span>
         <select value={cv} onChange={e=>setCv(e.target.value)} style={SEL}>{CVS.map(c=><option key={c} value={c}>{c}</option>)}</select>
         <div style={{marginLeft:'auto',display:'flex',gap:4}}>
-          <button onClick={doUndo} style={Bs(false)} title="Undo (Ctrl+Z)"><i className="ti ti-arrow-back-up" aria-hidden="true"/> Undo</button>
-          <button onClick={doRedo} style={Bs(false)} title="Redo (Ctrl+Y)"><i className="ti ti-arrow-forward-up" aria-hidden="true"/> Redo</button>
-        </div>
-        <div style={{display:'flex',gap:3}}>
-          {[0.25,0.5,0.75,1].map(v=>(
-            <button
-              key={v}
-              onClick={()=>setPlaybackRate(v)}
-              style={Bs(
-                playbackRate===v,
-                '#22ccff'
-              )}
-            >
-              {v}x
-            </button>
-          ))}
+          <button onClick={doUndo} style={Bs(false)} title="Ctrl+Z"><i className="ti ti-arrow-back-up"/> Undo</button>
+          <button onClick={doRedo} style={Bs(false)} title="Ctrl+Y"><i className="ti ti-arrow-forward-up"/> Redo</button>
         </div>
       </div>
 
+      {/* ── Main area ── */}
       <div style={{flex:1,display:'flex',minHeight:0}}>
         <div ref={ctrR} style={{flex:1,overflow:'hidden',position:'relative'}} onContextMenu={e=>e.preventDefault()}>
           <canvas ref={canR} width={cw} height={ch}
@@ -588,6 +614,7 @@ function App(){
             onMouseLeave={()=>setDrag(null)}/>
         </div>
 
+        {/* ── Right panel ── */}
         <div style={{width:205,background:'#0a0a1c',borderLeft:'1px solid #181830',display:'flex',flexDirection:'column',overflow:'hidden',flexShrink:0}}>
           <div style={{display:'flex',borderBottom:'1px solid #181830',flexShrink:0}}>
             {['Chart','Controls'].map(tab=>{const k=tab==='Chart'?'chart':'controls';return(
@@ -598,42 +625,11 @@ function App(){
             {panel==='chart'?(
               <div style={{display:'flex',flexDirection:'column',gap:9}}>
                 <Sec title="Metadata">
-                  {[['title','Title'],['artist','Artist'],['effector','Effector'],['music','Music file']].map(([k,l])=>(
+                  {[['title','Title'],['artist','Artist'],['effector','Effector'],['music','Music filename']].map(([k,l])=>(
                     <Fld key={k} label={l} value={chart.meta[k]} onChange={v=>setChart(p=>({...p,meta:{...p.meta,[k]:v}}))} INP={INP} LBL={LBL}/>
                   ))}
                 </Sec>
                 <Sec title="Chart settings">
-                  <label style={{...Bs(false),cursor:'pointer'}}>
-                    Upload Music
-                    <input
-                      type="file"
-                      accept="audio/*"
-                      style={{display:'none'}}
-                      onChange={async e=>{
-                        const file = e.target.files[0];
-                        if(!file) return;
-                  
-                        if(!audioCtxR.current){
-                          audioCtxR.current =
-                            new AudioContext();
-                        }
-                  
-                        const arr =
-                          await file.arrayBuffer();
-                  
-                        audioBufferR.current =
-                          await audioCtxR.current.decodeAudioData(arr);
-                  
-                        setChart(p=>({
-                          ...p,
-                          meta:{
-                            ...p.meta,
-                            music:file.name
-                          }
-                        }));
-                      }}
-                    />
-                  </label>
                   <Fld label="BPM" type="number" value={chart.meta.bpm} onChange={v=>setChart(p=>({...p,meta:{...p.meta,bpm:+v||120}}))} INP={INP} LBL={LBL}/>
                   <div style={{display:'flex',flexDirection:'column',gap:2}}>
                     <span style={LBL}>Difficulty</span>
@@ -645,7 +641,7 @@ function App(){
                   <Fld label="Offset (ms)" type="number" value={chart.meta.offset} onChange={v=>setChart(p=>({...p,meta:{...p.meta,offset:+v||0}}))} INP={INP} LBL={LBL}/>
                 </Sec>
                 <Sec title="Note count">
-                  {[['BT Chips',chart.notes.filter(n=>n.type==='bt_chip').length,'#ffdd00'],['BT Holds',chart.notes.filter(n=>n.type==='bt_hold').length,'#ffaa00'],['FX Chips',chart.notes.filter(n=>n.type==='fx_chip').length,'#ffffff'],['FX Holds',chart.notes.filter(n=>n.type==='fx_hold').length,'#ff6600'],['L Laser pts',chart.lasers.L.length,'#22ccff'],['R Laser pts',chart.lasers.R.length,'#ff2222']].map(([l,v,c])=>(
+                  {[['BT Chips',chart.notes.filter(n=>n.type==='bt_chip').length,'#ff7700'],['BT Holds',chart.notes.filter(n=>n.type==='bt_hold').length,'#ffaa00'],['FX Chips',chart.notes.filter(n=>n.type==='fx_chip').length,'#f2f2ff'],['FX Holds',chart.notes.filter(n=>n.type==='fx_hold').length,'#ddddff'],['L Laser pts',chart.lasers.L.length,'#22ccff'],['R Laser pts',chart.lasers.R.length,'#ff3333']].map(([l,v,c])=>(
                     <div key={l} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',borderBottom:'1px solid #0f0f20'}}><span style={{color:'#334455'}}>{l}</span><span style={{color:c}}>{v}</span></div>
                   ))}
                 </Sec>
@@ -660,23 +656,22 @@ function App(){
                   ))}
                 </Sec>
                 <Sec title="Mouse controls">
-                  {[['Left click','Place note / laser pt'],['Left drag','Create hold (drag to extend)'],['Right click','Delete note / laser pt'],['Ctrl + scroll','Zoom in / out'],['Scroll wheel','Navigate timeline']].map(([k,v])=>(
+                  {[['L click','Place note/laser pt'],['L drag','Create hold'],['R click','Delete'],['Scroll','Navigate timeline'],['Ctrl/Shift+scroll','Zoom']].map(([k,v])=>(
+                    <div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',borderBottom:'1px solid #0f0f20'}}><span style={{color:'#2a3a4a'}}>{k}</span><span style={{color:'#334455'}}>{v}</span></div>
+                  ))}
+                </Sec>
+                <Sec title="Playback">
+                  {[['Space','Play / Stop'],['Speed buttons','0.25x – 1x'],['Load Music','Toolbar button']].map(([k,v])=>(
                     <div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',borderBottom:'1px solid #0f0f20'}}><span style={{color:'#2a3a4a'}}>{k}</span><span style={{color:'#334455'}}>{v}</span></div>
                   ))}
                 </Sec>
                 <Sec title="Snap hotkeys">
-                  {[['Ctrl+4','1/4'],['Ctrl+8','1/8'],['Ctrl+6','1/16'],['Ctrl+Shift+4','1/24'],['Ctrl+Shift+2','1/32'],['Ctrl+Shift+8','1/48']].map(([k,v])=>(
+                  {[['Ctrl+4','÷4'],['Ctrl+8','÷8'],['Ctrl+6','÷16'],['Ctrl+⇧4','÷24'],['Ctrl+⇧2','÷32'],['Ctrl+⇧8','÷48']].map(([k,v])=>(
                     <div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',borderBottom:'1px solid #0f0f20'}}><span style={{color:'#2a3a4a'}}>{k}</span><span style={{color:'#334455'}}>{v}</span></div>
                   ))}
                 </Sec>
-                <Sec title="Laser curve types">
-                  <div style={{color:'#2a3a4a',fontSize:9,marginBottom:4}}>Choose curve before placing laser points. Set in toolbar or click below.</div>
-                  <div style={{display:'flex',flexWrap:'wrap',gap:3}}>
-                    {CVS.map(c=><button key={c} onClick={()=>setCv(c)} style={{...Bs(cv===c,'#22ccff'),padding:'2px 6px',fontSize:9}}>{c}</button>)}
-                  </div>
-                </Sec>
                 <Sec title="Export notes">
-                  <div style={{color:'#2a3a4a',fontSize:9}}>FX holds export with 'S' effect (flanger). Edit the .ksh file to change FX hold effects. Laser positions use 51-step KSH encoding (0=left, P=center, o=right).</div>
+                  <div style={{color:'#2a3a4a',fontSize:9}}>Exports ver=160 KSH. FX holds use '1'. Add fx-l/fx-r options manually for effects (Flanger, Gate, etc). Laser: 0=left, P=center, o=right.</div>
                 </Sec>
               </div>
             )}
@@ -684,103 +679,34 @@ function App(){
         </div>
       </div>
 
-      <div
-        style={{
-          height:42,
-          background:'#060609',
-          borderTop:'1px solid #141424',
-          display:'flex',
-          alignItems:'center',
-          gap:10,
-          padding:'0 10px',
-          flexShrink:0
-        }}
-      >
-        <span style={{
-          fontSize:10,
-          color:'#556677'
-        }}>
-          DIVISION
-        </span>
-      
-        <select
-          value={si}
-          onChange={e=>setSi(+e.target.value)}
-          style={{
-            background:'#0d0d1a',
-            color:'#ccd6ff',
-            border:'1px solid #222244',
-            height:24,
-            fontSize:11
-          }}
-        >
-          {SL.map((l,i)=>(
-            <option key={i} value={i}>
-              {l}
-            </option>
+      {/* ── Bottom bar: division selector + zoom slider ── */}
+      <div style={{height:36,background:'#060609',borderTop:'1px solid #141424',display:'flex',alignItems:'center',gap:6,padding:'0 10px',flexShrink:0,overflow:'hidden'}}>
+        <span style={{fontSize:10,color:'#556677',flexShrink:0}}>M<span style={{color:'#6677aa'}}>{cM}</span> B<span style={{color:'#6677aa'}}>{cB}</span></span>
+        <span style={{color:ct?.c||'#556677',fontSize:9,flexShrink:0}}>{ct?.n}</span>
+        <div style={{width:1,height:16,background:'#141424',flexShrink:0}}/>
+        <span style={{fontSize:9,color:'#334455',flexShrink:0}}>DIV</span>
+        {/* Division buttons — all presets + custom */}
+        <div style={{display:'flex',gap:2,overflowX:'auto',flex:1,minWidth:0}}>
+          {snapDivs.map((d,i)=>(
+            <button key={d} onClick={()=>setSi(i)} style={{background:si===i?'#111128':'transparent',border:`1px solid ${si===i?'#2233aa':'#141424'}`,color:si===i?'#6677cc':'#334455',padding:'1px 5px',cursor:'pointer',fontSize:8,fontFamily:'monospace',borderRadius:2,flexShrink:0}}>
+              {d}
+            </button>
           ))}
-        </select>
-      
-        <input
-          type="number"
-          min={1}
-          max={1920}
-          placeholder="custom"
-          style={{
-            width:70,
-            background:'#0d0d1a',
-            color:'#ccd6ff',
-            border:'1px solid #222244',
-            height:22
-          }}
-          onKeyDown={e=>{
-            if(e.key !== 'Enter') return;
-      
-            const v=parseInt(e.target.value);
-      
-            if(
-              isNaN(v) ||
-              v<1 ||
-              v>1920
-            ) return;
-      
-            setSnapDivs(prev => [...prev, v]);
-            
-            setSi(snapDivs.length);
-          }}
-        />
-      
-        <span style={{
-          fontSize:10,
-          color:'#556677',
-          marginLeft:20
-        }}>
-          ZOOM
-        </span>
-      
-        <input
-          type="range"
-          min={0.15}
-          max={8}
-          step={0.01}
-          value={zoom}
-          onChange={e=>
-            setZoom(+e.target.value)
-          }
-          style={{width:220}}
-        />
-      
-        <span style={{color:'#99aaff'}}>
-          {Math.round(zoom*100)}%
-        </span>
-      
-        <span style={{
-          marginLeft:'auto',
-          color:'#556677',
-          fontSize:10
-        }}>
-          Space = Play/Pause
-        </span>
+          <input
+            value={customDivInput}
+            onChange={e=>setCustomDivInput(e.target.value)}
+            onKeyDown={e=>{if(e.key==='Enter')addCustomDiv();}}
+            placeholder="1-1920"
+            style={{background:'#080810',border:'1px solid #141424',color:'#8899aa',padding:'1px 4px',fontSize:8,width:52,fontFamily:'monospace',borderRadius:2,flexShrink:0}}
+          />
+          <button onClick={addCustomDiv} style={{background:'#0b0b1c',border:'1px solid #141424',color:'#445566',padding:'1px 6px',cursor:'pointer',fontSize:8,fontFamily:'monospace',borderRadius:2,flexShrink:0}}>+</button>
+        </div>
+        <div style={{width:1,height:16,background:'#141424',flexShrink:0}}/>
+        <span style={{fontSize:9,color:'#334455',flexShrink:0}}>ZOOM</span>
+        <input type="range" min={15} max={800} step={5} value={Math.round(zoom*100)}
+          onChange={e=>setZoom(+e.target.value/100)}
+          style={{width:100,accentColor:'#3344bb',flexShrink:0}}/>
+        <span style={{color:'#6677aa',fontSize:9,minWidth:34,flexShrink:0}}>{Math.round(zoom*100)}%</span>
       </div>
     </div>
   );
@@ -802,12 +728,8 @@ function Fld({label,value,onChange,type='text',INP,LBL}){
     </div>
   );
 }
-ReactDOM
-  .createRoot(
-    document.getElementById("root")
-  )
-  .render(<App />);
-  </script>
 
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
 </body>
 </html>
