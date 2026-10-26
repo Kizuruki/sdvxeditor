@@ -462,6 +462,27 @@ class Preview3D {
 		if (S.drawOffsetMs) c.fillText('DRAW ' + (S.drawOffsetMs > 0 ? '+' : '') + S.drawOffsetMs + ' ms', hx, hy + 28);
 	}
 
+	// Engine tilt over the whole chart in KSH units (1 = 10 deg), sampled at 120 Hz of song time; cached per edit.
+	tiltTrack() {
+		this._prep();
+		if (this._tt && this._tt.ver === this.ver) return this._tt;
+		const RATE = 120, ed = this.ed;
+		const endT = Math.max(960, (ed.chartEndTick ? ed.chartEndTick() : 0) + 960);
+		const s0 = this.secAt(0) - 1, s1 = this.secAt(endT);
+		const n = Math.max(2, Math.ceil((s1 - s0) * RATE) + 1), v = new Float32Array(n);
+		const st = this._freshSim(s0 - 1.5);
+		const h = 1 / RATE;
+		while (st.sec + h <= s0) this._step(st, st.sec + h, h);
+		for (let k = 0; k < n; k++) { const target = s0 + k * h; if (target > st.sec) this._step(st, target, target - st.sec); v[k] = -st.roll / PV.MAX_ROLL; }
+		this._tt = { ver: this.ver, s0, rate: RATE, v };
+		return this._tt;
+	}
+	tiltAtTick(t) {
+		const tt = this.tiltTrack(), x = (this.secAt(t) - tt.s0) * tt.rate, k = Math.floor(x);
+		if (k < 0) return tt.v[0]; if (k + 1 >= tt.v.length) return tt.v[tt.v.length - 1];
+		return tt.v[k] + (tt.v[k + 1] - tt.v[k]) * (x - k);
+	}
+
 	// Engine tilt in KSH units (1 = 10°, + = clockwise like KSH tilt) sampled from t0 to t1 every `step`
 	// ticks; used for the dashed "auto" ghost in the Tilt column.
 	tiltCurve(t0, t1, step) {

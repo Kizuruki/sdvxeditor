@@ -14,9 +14,32 @@ const DIVS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 192];
 const LASER_SNAPS = [{ v: 1, label: '51 (fine)' }, { v: 5, label: '11 (1/10)' }, { v: 10, label: '6 (1/5)' }, { v: 25, label: '3 (1/2)' }];
 const CAM_STEP = { zoom_top: 5, zoom_bottom: 5, zoom_side: 5, center_split: 5, rotation_deg: 5, scroll_speed: 0.05, tilt: 0.05 };
 
+// chart event lists that live in the timing column (besides BPM / beat / stop)
+const EV_KEYS = ['filterType', 'pfilterGain', 'slamVol', 'slamSE', 'raw'];
+// Plain-language explanations shown in tooltips, popovers and the Properties panel
+const EVENT_HELP = {
+	bpm: { title: 'BPM change', ksh: 't=', short: 'Tempo from this point on. Changes how fast the chart scrolls and where beats fall.' },
+	sig: { title: 'Time signature', ksh: 'beat=n/d', short: 'Measure length from this measure on (4/4 = four quarter notes).' },
+	stops: { title: 'Stop', ksh: 'stop=', short: 'The lane stops scrolling for this long while the music keeps playing (notes freeze in place).' },
+	spins: { title: 'Lane spin / swing', ksh: '@( @) @< @> S< S>', short: 'Spins the whole lane (full or half turn) or swings it sideways. Normally put on a slam.' },
+	filterType: { title: 'Laser effect', ksh: 'filtertype=', short: 'The sound effect lasers put on the music while a laser is active: peak = peaking filter (default), lpf1 = low-pass (muffled), hpf1 = high-pass (thin), bitc = bitcrusher (crunchy). The effect grows as the knob moves away from its start side. Lasts until the next change.' },
+	pfilterGain: { title: 'Laser effect strength', ksh: 'pfiltergain=', short: 'How strong the laser effect is, 0–100 (50 is the usual default). 0 makes lasers silent. Lasts until the next change.' },
+	slamVol: { title: 'Slam volume', ksh: 'chokkakuvol=', short: 'Volume of the slam sound from here on, 0–100. The starting volume is set in the Chart tab.' },
+	slamSE: { title: 'Slam sound', ksh: 'chokkakuse=', short: 'Which sound the slam on this line makes: up, down, swing or mute.' },
+	raw: { title: 'Other KSH line', ksh: '', short: 'A line kept as-is from the .ksh (an option this editor does not edit, or a comment). It is saved back unchanged.' },
+	zoom_top: { title: 'Zoom Top', ksh: 'zoom_top=', short: 'Tips the lane forward or back around the judgment line (camera pitch). + stands the lane up (far end higher), − lays it flatter. Big values flip it over.' },
+	zoom_bottom: { title: 'Zoom Bottom', ksh: 'zoom_bottom=', short: 'Moves the camera toward (+, lane gets bigger) or away from (−, smaller) the lane.' },
+	zoom_side: { title: 'Zoom Side', ksh: 'zoom_side=', short: 'Shifts the lane sideways: + right, − left. Slam kicks are made of these.' },
+	tilt: { title: 'Tilt', ksh: 'tilt=', short: 'Numbers tilt the lane by hand: 1 = 10°, + = clockwise. Words set the game\'s automatic laser tilt: normal / bigger / biggest, keep_* (hold the tilt until it grows), zero (off). The dashed line shows the tilt the game will actually apply.' },
+	rotation_deg: { title: 'Rotation', ksh: 'rotation_deg=', short: 'Extra lane rotation in degrees around the far end of the lane (KSM v2 only; USC export turns it into tilt).' },
+	center_split: { title: 'Center split', ksh: 'center_split=', short: 'Splits the lane down the middle and moves the halves apart.' },
+	scroll_speed: { title: 'Scroll speed', ksh: 'scroll_speed=', short: 'Multiplies the scroll speed: 1 = normal, 0 = notes stand still, negative = notes scroll backwards (KSM v2).' },
+};
+
 const DEFAULT_SETTINGS = {
 	laneW: 42, showWave: true, showPreview: true, rate: 1, follow: true,
 	speedMode: 'mod', modSpeed: 800, hiSpeed: 5, drawOffsetMs: 0, previewW: 340,
+	autoKick: true, kickAmount: 30, kickLen: 120, showTiltGhost: true,
 	volMusic: 0.8, volHit: 0.55, volGame: 0.7, volMetro: 0, hitsounds: true, gameSounds: true, playFx: true, latencyMs: 0, autosave: true, placeSound: false,
 	cols: { zoom_top: true, zoom_bottom: true, zoom_side: true, tilt: true, rotation_deg: true, center_split: false, scroll_speed: false },
 };
@@ -61,6 +84,11 @@ class Editor {
 	begin() { if (!this._snap) this._snap = K.cloneChart(this.chart); }
 	commit(label) {
 		if (!this._snap) return;
+		if (this.settings.autoKick && /^(Laser|Laser slam|Extend laser|Move laser point|Make slam|Slam end)$/.test(label)) {
+			const before = new Set(); this._snap.laser.forEach((lane, li) => lane.forEach(sc => sc.pts.forEach(p => { if (p.v !== p.vf) before.add(li + ':' + (sc.t + p.ry)); })));
+			const fresh = this.slamList(this.chart).filter(sl => !before.has(sl.lane + ':' + sl.t));
+			if (fresh.length) this.addSlamKicks(this.chart, fresh);
+		}
 		this.undoStack.push({ chart: this._snap, sel: [...this.sel], label });
 		if (this.undoStack.length > 400) this.undoStack.shift();
 		this.redoStack = [];
@@ -97,6 +125,88 @@ class Editor {
 		this.emit('select'); this.emit('loaded');
 	}
 
+	// ---------------------------------------------------------------- slam kicks / per-laser engine settings
+	slamList(c, ids) { // [{t, lane, dir, id}] sorted
+		const out = [];
+		c.laser.forEach((lane, li) => lane.forEach(sc => sc.pts.forEach(p => {
+			if (p.v === p.vf || (ids && !ids.has(p.id))) return;
+			out.push({ t: sc.t + p.ry, lane: li, dir: Math.sign(K.laserPos(p.vf, sc.wide) - K.laserPos(p.v, sc.wide)), id: p.id });
+		})));
+		return out.sort((a, b) => a.t - b.t);
+	}
+	// zoom_side "kick" keyframes: jump by +-amount at the slam (in the slam's direction), ease back over len ticks
+	addSlamKicks(c, slams, amount, len) {
+		amount = amount ?? (this.settings.kickAmount || 30); len = len ?? (this.settings.kickLen || 120);
+		const arr = c.cam.zoom_side.slice(), mine = new Set();
+		const out = K.CURVE_PRESETS.find(p => p.id === 'out');
+		// one kick per tick (two lanes slamming together: use the bigger/first direction)
+		const byT = new Map(); for (const sl of slams) if (!byT.has(sl.t)) byT.set(sl.t, sl);
+		const list = [...byT.values()].sort((a, b) => a.t - b.t);
+		const allSlamT = this.slamList(c).map(x => x.t);
+		let added = 0;
+		for (const sl of list) {
+			const t = sl.t;
+			const nextSlam = allSlamT.find(x => x > t);
+			const end = Math.min(t + len, nextSlam ?? Infinity);
+			const at = arr.findIndex(p => p.t === t);
+			const foreign = arr.some(p => p.t > t && p.t <= end && !mine.has(p.id)) || (at >= 0 && !mine.has(arr[at].id));
+			if (foreign || !sl.dir) continue;
+			const base = at >= 0 ? (typeof arr[at].v === 'number' ? arr[at].v : 0) : K.graphValueAt(arr, t, 0);
+			const kick = { id: at >= 0 ? arr[at].id : K.nid(), t, v: base, vf: base + sl.dir * amount, a: out.a, b: out.b };
+			if (at >= 0) arr[at] = kick; else K.insertSorted(arr, kick);
+			mine.add(kick.id);
+			if (!arr.some(p => p.t === end)) { const r = { id: K.nid(), t: end, v: base, a: 0, b: 0 }; K.insertSorted(arr, r); mine.add(r.id); }
+			added++;
+		}
+		c.cam.zoom_side = arr;
+		return added;
+	}
+	// remove kicks made by addSlamKicks: a keyframe on a slam that jumps and comes back to its value
+	removeSlamKicks(c, slams) {
+		const arr = c.cam.zoom_side; const drop = new Set();
+		for (const sl of slams) {
+			const i = arr.findIndex(p => p.t === sl.t);
+			if (i < 0) continue;
+			const p = arr[i], q = arr[i + 1];
+			if (typeof p.vf !== 'number' || p.vf === p.v) continue;
+			drop.add(p.id);
+			if (q && q.v === p.v && q.vf === undefined && !this.slamList(c).some(x => x.t === q.t)) drop.add(q.id);
+			else if (q && q.v === p.v) { /* the next kick starts here: keep it */ }
+		}
+		c.cam.zoom_side = arr.filter(p => !drop.has(p.id));
+		return drop.size;
+	}
+	// engine tilt for the span of one laser: writes tilt=<mode> at its start and restores the previous auto mode at its end
+	laserTiltMode(sc) {
+		const c = this.chart, end = K.sectionEndTick(sc);
+		const at = c.tilt.find(p => p.t === sc.t && typeof p.v === 'string');
+		if (!at) return 'inherit';
+		return at.v;
+	}
+	setLaserTiltMode(sc, mode) {
+		this.edit('Laser tilt', c => {
+			const end = K.sectionEndTick(sc);
+			let arr = c.tilt.filter(p => !(typeof p.v === 'string' && (p.t === sc.t || p.t === end)));
+			const prev = K.lastAtOrBefore(arr, sc.t - 1);
+			const prevMode = prev && typeof prev.v === 'string' ? prev.v : prev ? null : 'normal';
+			if (mode !== 'inherit') {
+				if (arr.some(p => p.t > sc.t && p.t < end)) toast('There are tilt keyframes inside this laser; they still apply');
+				K.insertSorted(arr, { id: K.nid(), t: sc.t, v: mode, a: 0, b: 0 });
+				if (prevMode && prevMode !== mode && !arr.some(p => p.t === end)) K.insertSorted(arr, { id: K.nid(), t: end, v: prevMode, a: 0, b: 0 });
+			}
+			c.tilt = arr;
+		});
+	}
+	// value of a step event list (filterType / pfilterGain) at a tick, or the header default
+	stepAt(list, t, def) { const p = K.lastAtOrBefore(list, t); return p ? p.v : def; }
+	setStepAt(key, t, v, label) {
+		this.edit(label, c => {
+			let arr = c[key].filter(p => p.t !== t);
+			if (v !== null && v !== undefined && v !== '') K.insertSorted(arr, { id: K.nid(), t, v: String(v) });
+			c[key] = arr;
+		});
+	}
+
 	// ---------------------------------------------------------------- lookup
 	index() {
 		if (this._idxVer === this.version && this._idx) return this._idx;
@@ -113,6 +223,7 @@ class Editor {
 		c.stops.forEach(b => m.set(b.id, { kind: 'stop', item: b }));
 		c.sig.forEach(b => m.set(b.id, { kind: 'sig', item: b }));
 		c.spins.forEach(b => m.set(b.id, { kind: 'spin', item: b }));
+		for (const key of EV_KEYS) c[key].forEach(e => m.set(e.id, { kind: 'ev', key, item: e }));
 		this._idx = m; this._idxVer = this.version;
 		return m;
 	}
@@ -196,6 +307,8 @@ class Editor {
 	}
 	hitTiming(x, y) {
 		const tv = this.tl, c = this.chart;
+		const hs = tv.timingHits || [];
+		for (let i = hs.length - 1; i >= 0; i--) { const r = hs[i]; if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) return r; }
 		const near = (t) => Math.abs(tv.yOf(t) - (y + 6)) <= 9 || Math.abs(tv.yOf(t) - y) <= 6;
 		for (const b of c.bpm) if (near(b.t)) return { kind: 'bpm', item: b };
 		for (const s of c.sig) if (near(this.timing.measureStart(s.m))) return { kind: 'sig', item: s };
@@ -230,8 +343,10 @@ class Editor {
 			if (h) {
 				this.setSel([h.item.id], shift || ctrl);
 				if (dbl) { this.editTimingItem(h, e.clientX, e.clientY); return; }
-				if (h.kind !== 'sig' && !(h.kind === 'bpm' && h.item.t === 0)) this.startDrag({ type: 'tmove', hit: h, t0: h.item.t, y0: y });
-			} else this.addTimingPopover(this.snapT(t, alt), e.clientX, e.clientY);
+				if (shift || ctrl) { this.toggleSel([h.item.id]); return; }
+				if (!this.sel.has(h.item.id)) this.setSel([h.item.id]);
+				if (h.kind !== 'sig' && !(h.kind === 'bpm' && h.item.t === 0)) this.startDrag({ type: 'move', x0: x, y0: y, anchor: { kind: 'timing' }, alt });
+			} else this.drag = { type: 'tpending', x0: x, y0: y, t: this.snapT(t, alt), cx: e.clientX, cy: e.clientY, add: shift || ctrl, base: new Set(this.sel) };
 			return;
 		}
 		if (reg.kind === 'cam') {
@@ -342,6 +457,7 @@ class Editor {
 		const t = tv.tickAt(y), alt = e.altKey;
 		switch (d.type) {
 			case 'pan': tv.bottomTick = d.b0 + (y - d.y0) / tv.ppt; break;
+			case 'tpending': if (Math.abs(x - d.x0) + Math.abs(y - d.y0) > 5) { this.drag = { type: 'marquee', x0: d.x0, y0: d.y0, x1: x, y1: y, add: d.add, base: d.base }; if (!d.add) this.sel = new Set(); } break;
 			case 'scrub': this.scrubTo(t, alt); break;
 			case 'marquee': {
 				d.x1 = x; d.y1 = y;
@@ -368,6 +484,7 @@ class Editor {
 			case 'lnew': this.commitLaserNew(d); break;
 			case 'lextend': this.commitLaserExtend(d); break;
 			case 'marquee': this.emit('select'); break;
+			case 'tpending': this.addTimingPopover(d.t, d.cx, d.cy); break;
 			case 'move': case 'resize': case 'lmove': case 'cmove': case 'tmove':
 				if (d.moved || d.created || d.label) this.commit(d.label || ({ move: 'Move', resize: 'Resize hold', lmove: 'Move laser point', cmove: 'Move keyframe', tmove: 'Move timing event' })[d.type]);
 				else this.cancelSnapOnly();
@@ -405,6 +522,12 @@ class Editor {
 		else if (reg.kind === 'track' && this.tool !== 'select') cur = 'crosshair';
 		else if (reg.kind === 'cam' || reg.kind === 'timing') cur = 'cell';
 		this.tl.cv.style.cursor = cur;
+		// native tooltip with a plain explanation of what is under the mouse
+		let help = '';
+		const H = (k) => EVENT_HELP[k] ? EVENT_HELP[k].title + (EVENT_HELP[k].ksh ? ' (' + EVENT_HELP[k].ksh + ')' : '') + ': ' + EVENT_HELP[k].short : '';
+		if (h) help = h.kind === 'ev' ? H(h.key) : h.kind === 'cam' ? H(h.key) : h.kind === 'bpm' ? H('bpm') : h.kind === 'sig' ? H('sig') : h.kind === 'stop' ? H('stops') : h.kind === 'spin' ? H('spins') : '';
+		else if (m.y < tv.HEAD) help = reg.kind === 'cam' ? H(reg.key) : reg.kind === 'timing' ? 'Timing column: BPM, time signatures, stops, laser effect / strength, slam volume and other KSH lines. Click empty space to add one, drag to box-select, double-click an item to edit it.' : '';
+		if (this.tl.cv.title !== help) this.tl.cv.title = help;
 	}
 	updateGhost() {
 		const d = this.drag, tv = this.tl, m = this.mouse;
@@ -497,7 +620,9 @@ class Editor {
 			if (col.r < x0 || col.l > x1) continue;
 			for (const p of this.camArr(col.key)) if (p.t >= tA && p.t <= tB) ids.push(p.id);
 		}
-		return ids;
+		for (const r of tv.timingHits || []) if (r.x1 >= x0 && r.x0 <= x1 && r.y1 >= y0 && r.y0 <= y1) ids.push(r.item.id);
+		if (x1 >= tv.trackR - 60 && x0 <= tv.trackR) for (const s of c.spins) if (s.t >= tA && s.t <= tB) ids.push(s.id);
+		return [...new Set(ids)];
 	}
 	setSel(ids, add) { if (add) for (const id of ids) this.sel.add(id); else this.sel = new Set(ids); this.emit('select'); this.requestDraw(); }
 	toggleSel(ids) { const all = ids.every(id => this.sel.has(id)); for (const id of ids) all ? this.sel.delete(id) : this.sel.add(id); this.emit('select'); this.requestDraw(); }
@@ -618,6 +743,16 @@ class Editor {
 			const taken = new Set(others.map(p => p.t));
 			if (mv.some(p => taken.has(p.t))) continue;
 			this.setCamArr(key, K.sortByT([...others, ...mv]), c);
+		}
+		// timing column items and spins (time only; the first BPM and time signatures stay put)
+		for (const key of ['bpm', 'stops', 'spins', ...EV_KEYS]) {
+			const arr = c[key];
+			if (!arr.some(p => this.sel.has(p.id))) continue;
+			const mv = arr.filter(p => this.sel.has(p.id) && !(key === 'bpm' && p.t === 0)).map(p => ({ ...p, t: Math.max(key === 'bpm' ? 1 : 0, p.t + dt) }));
+			const ids = new Set(mv.map(p => p.id));
+			const others = arr.filter(p => !ids.has(p.id));
+			if (key !== 'raw') { const taken = new Set(others.map(p => p.t)); if (mv.some(p => taken.has(p.t))) continue; }
+			c[key] = K.sortByT([...others, ...mv]);
 		}
 		this.chart = c;
 		d.moved = dt !== 0 || dLane !== 0 || dv !== 0;
@@ -763,6 +898,7 @@ class Editor {
 			case 'sig': if (h.item.m === 0) { toast('The first time signature cannot be deleted.', true); this._snap = null; return; } c.sig = c.sig.filter(b => b.id !== h.item.id); break;
 			case 'stop': c.stops = c.stops.filter(b => b.id !== h.item.id); break;
 			case 'spin': c.spins = c.spins.filter(b => b.id !== h.item.id); break;
+			case 'ev': c[h.key] = c[h.key].filter(b => b.id !== h.item.id); break;
 		}
 		this.sel.delete(h.item.id);
 		this.hover = null;
@@ -795,6 +931,7 @@ class Editor {
 		c.tilt = c.tilt.filter(p => !ids.has(p.id));
 		c.stops = c.stops.filter(p => !ids.has(p.id));
 		c.spins = c.spins.filter(p => !ids.has(p.id));
+		for (const k of EV_KEYS) c[k] = c[k].filter(p => !ids.has(p.id));
 		c.bpm = c.bpm.filter(p => !ids.has(p.id) || p.t === 0);
 		c.sig = c.sig.filter(p => !ids.has(p.id) || p.m === 0);
 		const n = ids.size;
@@ -802,24 +939,34 @@ class Editor {
 		this.commit('Delete ' + n + ' item' + (n > 1 ? 's' : ''));
 		this.emit('select');
 	}
-	selectAll() {
+	selectAll(everything) {
 		const c = this.chart, ids = [];
 		c.bt.forEach(l => l.forEach(n => ids.push(n.id))); c.fx.forEach(l => l.forEach(n => ids.push(n.id)));
 		c.laser.forEach(l => l.forEach(s => s.pts.forEach(p => ids.push(p.id))));
+		if (everything) {
+			for (const k of K.CAM_KEYS) c.cam[k].forEach(p => ids.push(p.id));
+			c.tilt.forEach(p => ids.push(p.id)); c.spins.forEach(p => ids.push(p.id)); c.stops.forEach(p => ids.push(p.id));
+			c.bpm.forEach(p => { if (p.t > 0) ids.push(p.id); });
+			for (const k of EV_KEYS) c[k].forEach(p => ids.push(p.id));
+		}
 		this.setSel(ids);
 	}
 	copy(cut) {
 		const items = this.selected();
 		if (!items.length) return;
-		const out = { notes: [], secs: [], cams: [], minT: Infinity };
+		const out = { notes: [], secs: [], cams: [], evs: [], minT: Infinity };
 		const secSeen = new Set();
 		for (const e of items) {
 			if (e.kind === 'bt' || e.kind === 'fx') { out.notes.push({ kind: e.kind, lane: e.lane, n: e.item }); out.minT = Math.min(out.minT, e.item.t); }
 			else if (e.kind === 'lpt' && !secSeen.has(e.sec.id)) { secSeen.add(e.sec.id); out.secs.push({ lane: e.lane, s: e.sec }); out.minT = Math.min(out.minT, e.sec.t); }
 			else if (e.kind === 'cam') { out.cams.push({ key: e.key, p: e.item }); out.minT = Math.min(out.minT, e.item.t); }
+			else if (e.kind === 'bpm' || e.kind === 'stop' || e.kind === 'spin' || e.kind === 'ev') {
+				out.evs.push({ key: e.kind === 'bpm' ? 'bpm' : e.kind === 'stop' ? 'stops' : e.kind === 'spin' ? 'spins' : e.key, p: e.item });
+				out.minT = Math.min(out.minT, e.item.t);
+			}
 		}
 		this.clipboard = out;
-		toast('Copied ' + (out.notes.length + out.secs.length + out.cams.length) + ' item(s)');
+		toast('Copied ' + (out.notes.length + out.secs.length + out.cams.length + out.evs.length) + ' item(s)');
 		if (cut) this.deleteSelection();
 	}
 	paste(mirror) {
@@ -848,6 +995,13 @@ class Editor {
 			const f = (v) => neg && typeof v === 'number' ? -v : v;
 			const np = { ...p, id: K.nid(), t: p.t + off, v: f(p.v) }; if (p.vf !== undefined) np.vf = f(p.vf);
 			K.insertSorted(arr, np); this.setCamArr(key, arr); ids.push(np.id);
+		}
+		for (const { key, p } of cb.evs || []) {
+			const t = p.t + off; if (t < 0) continue;
+			const arr = key === 'raw' ? c[key].slice() : c[key].filter(q => q.t !== t);
+			const np = { ...p, id: K.nid(), t };
+			if (mirror && key === 'spins') np.dir = -p.dir;
+			K.insertSorted(arr, np); c[key] = arr; ids.push(np.id);
 		}
 		this.sel = new Set(ids);
 		this.commit(mirror ? 'Paste mirrored' : 'Paste');
@@ -889,10 +1043,22 @@ class Editor {
 	}
 
 	// ---------------------------------------------------------------- timing events
+	setEvent(key, id, patch, label) { this.edit(label || 'Edit event', c => { const o = c[key].find(x => x.id === id); if (o) this.replaceIn(c[key], id, { ...o, ...patch }); }); }
+	editEventPopover(key, item, cx, cy) {
+		const H = EVENT_HELP[key] || {};
+		if (key === 'filterType') popover(cx, cy, H.title, [{ key: 'v', label: 'Effect', type: 'select', value: item.v, options: [...new Set([item.v, 'peak', 'lpf1', 'hpf1', 'bitc'])].map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Laser effect'));
+		else if (key === 'pfilterGain' || key === 'slamVol') popover(cx, cy, H.title, [{ key: 'v', label: 'Value', type: 'number', value: item.v, hint: H.short }], v => this.setEvent(key, item.id, { v: String(K.clamp(parseInt(v.v, 10) || 0, 0, 100)) }));
+		else if (key === 'slamSE') popover(cx, cy, H.title, [{ key: 'v', label: 'Sound', type: 'select', value: item.v, options: K.SLAM_SOUNDS.map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Slam sound'));
+		else if (key === 'raw') popover(cx, cy, H.title, [{ key: 'k', label: 'Key', type: 'text', value: item.k, hint: '"//" = comment, empty = plain line' }, { key: 'v', label: 'Value', type: 'text', value: item.v }], v => this.setEvent(key, item.id, { k: v.k, v: v.v }, 'Edit line'));
+	}
 	addTimingPopover(t, cx, cy) {
 		const ms = this.timing.measureOf(t);
 		popover(cx, cy, 'Add at ' + posLabel(this.timing, t, this.div), [
-			{ key: 'type', label: 'Type', type: 'select', value: 'bpm', options: [['bpm', 'BPM change'], ['sig', 'Time signature (measure ' + (ms.m + 1) + ')'], ['stop', 'Stop (pause scroll)'], ['spin', 'Spin / swing']] },
+			{ key: 'type', label: 'Type', type: 'select', value: 'bpm', options: [['bpm', 'BPM change'], ['sig', 'Time signature (measure ' + (ms.m + 1) + ')'], ['stop', 'Stop (pause scroll)'], ['spin', 'Spin / swing'], ['filterType', 'Laser effect (filtertype)'], ['pfilterGain', 'Laser effect strength (pfiltergain)'], ['slamVol', 'Slam volume (chokkakuvol)'], ['comment', 'Comment']] },
+			{ key: 'help', type: 'note', value: (v) => (EVENT_HELP[{ bpm: 'bpm', sig: 'sig', stop: 'stops', spin: 'spins' }[v.type] || v.type] || {}).short || '' },
+			{ key: 'fv', label: 'Effect', type: 'select', value: 'lpf1', options: [['peak', 'peak — peaking filter'], ['lpf1', 'lpf1 — low-pass'], ['hpf1', 'hpf1 — high-pass'], ['bitc', 'bitc — bitcrusher']], show: v => v.type === 'filterType' },
+			{ key: 'nv', label: 'Value (0–100)', type: 'number', value: '50', show: v => v.type === 'pfilterGain' || v.type === 'slamVol' },
+			{ key: 'cv', label: 'Text', type: 'text', value: '', show: v => v.type === 'comment' },
 			{ key: 'bpm', label: 'BPM', type: 'number', value: K.fmtNum(this.timing.bpmAt(t)), show: v => v.type === 'bpm' },
 			{ key: 'sig', label: 'Beats', type: 'text', value: ms.n + '/' + ms.d, show: v => v.type === 'sig' },
 			{ key: 'stop', label: 'Length', type: 'text', value: '1/8', show: v => v.type === 'stop', hint: 'measures, e.g. 1/8, 3/16, 1' },
@@ -903,9 +1069,13 @@ class Editor {
 			else if (v.type === 'sig') { const [n, d] = String(v.sig).split('/').map(x => parseInt(x, 10)); if (!(n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d))) return toast('Use n/d where d is 1, 2, 4, 8, 16, 32 or 64', true); this.setSigAt(ms.m, n, d); }
 			else if (v.type === 'stop') { const l = parseLen(v.stop); if (!(l > 0)) return toast('Enter a length like 1/8', true); this.edit('Add stop', c => { c.stops = c.stops.filter(s => s.t !== t); K.insertSorted(c.stops, { id: K.nid(), t, l }); }); }
 			else if (v.type === 'spin') { const l = parseLen(v.slen); this.setSpinAt(t, v.spin, l > 0 ? l : 960); }
+			else if (v.type === 'filterType') this.setStepAt('filterType', t, v.fv, 'Laser effect');
+			else if (v.type === 'pfilterGain' || v.type === 'slamVol') this.setStepAt(v.type, t, K.clamp(parseInt(v.nv, 10) || 0, 0, 100), v.type === 'slamVol' ? 'Slam volume' : 'Laser effect strength');
+			else if (v.type === 'comment') this.edit('Add comment', c => { K.insertSorted(c.raw = c.raw.slice(), { id: K.nid(), t, k: '//', v: v.cv }); });
 		});
 	}
 	editTimingItem(h, cx, cy) {
+		if (h.kind === 'ev') { this.editEventPopover(h.key, h.item, cx, cy); return; }
 		if (h.kind === 'bpm') popover(cx, cy, 'BPM change', [{ key: 'v', label: 'BPM', type: 'number', value: K.fmtNum(h.item.v) }], v => { const b = parseFloat(v.v); if (b > 0) this.setBpmAt(h.item.t, b); });
 		else if (h.kind === 'sig') popover(cx, cy, 'Time signature (measure ' + (h.item.m + 1) + ')', [{ key: 'v', label: 'Beats', type: 'text', value: h.item.n + '/' + h.item.d }], v => { const [n, d] = String(v.v).split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) this.setSigAt(h.item.m, n, d); });
 		else if (h.kind === 'stop') popover(cx, cy, 'Stop', [{ key: 'v', label: 'Length', type: 'text', value: fmtLen(h.item.l) }], v => { const l = parseLen(v.v); if (l > 0) this.edit('Edit stop', c => this.replaceIn(c.stops, h.item.id, { ...h.item, l })); });
