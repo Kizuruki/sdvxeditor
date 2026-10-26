@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KSM Chart Editor</title>
+<!-- @inline style.css -->
+</head>
+<body>
+<div id="app">
+	<header id="menubar">
+		<div class="brand">KSM Chart Editor</div>
+		<nav id="menus"></nav>
+		<div id="docTitle" class="doc-title"></div>
+	</header>
+	<div id="optbar"></div>
+	<main id="main">
+		<aside id="previewPane">
+			<div class="pane-head"><span>Preview</span><span class="muted" title="Approximation of KSM's camera; check final charts in KSM">approx.</span></div>
+			<canvas id="preview"></canvas>
+		</aside>
+		<div id="toolbox"></div>
+		<section id="timelineWrap">
+			<canvas id="timeline" tabindex="0"></canvas>
+			<div id="dropHint">Drop a .ksh chart and/or audio file</div>
+		</section>
+		<aside id="side">
+			<div id="tabs"></div>
+			<div id="tabBody"></div>
+		</aside>
+	</main>
+	<footer id="transport"></footer>
+</div>
+<div id="popover" class="popover hidden"></div>
+<div id="modal" class="modal hidden"><div class="modal-box"><div class="modal-head"><span id="modalTitle"></span><button class="x" data-close>&times;</button></div><div id="modalBody"></div></div></div>
+<div id="toast" class="toast hidden"></div>
+<input type="file" id="fileInput" multiple hidden accept=".ksh,.kson,.ogg,.mp3,.wav,.flac,.m4a,.opus,.aac,audio/*">
+<!-- @inline core.js -->
+<!-- @inline audio.js -->
+<!-- @inline timeline.js -->
+<!-- @inline preview.js -->
+<!-- @inline editor.js -->
+<!-- @inline ui.js -->
+</body>
+</html>

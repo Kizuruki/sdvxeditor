@@ -1,0 +1,849 @@
+/* ============================================================================
+ * UI: menus, panels, transport, keyboard, files, main loop
+ * ========================================================================== */
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function h(tag, attrs, ...kids) {
+	const el = document.createElement(tag);
+	if (attrs) for (const [k, v] of Object.entries(attrs)) {
+		if (v === undefined || v === null || v === false) continue;
+		if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+		else if (k === 'html') el.innerHTML = v;
+		else if (k === 'value') el.value = v;
+		else if (k === 'checked') el.checked = !!v;
+		else el.setAttribute(k, v === true ? '' : v);
+	}
+	for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) el.append(k.nodeType ? k : document.createTextNode(String(k)));
+	return el;
+}
+const SVG = (inner, vb = '0 0 24 24') => `<svg viewBox="${vb}" xmlns="http://www.w3.org/2000/svg">${inner}</svg>`;
+const ICONS = {
+	play: SVG('<path d="M7 4l13 8-13 8z" fill="currentColor"/>'),
+	pause: SVG('<rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/>'),
+	stop: SVG('<rect x="6" y="6" width="12" height="12" fill="currentColor"/>'),
+	start: SVG('<rect x="5" y="5" width="3" height="14" fill="currentColor"/><path d="M20 5L9 12l11 7z" fill="currentColor"/>'),
+	metro: SVG('<path d="M9 3h6l4 18H5z M12 17l5-11" stroke="currentColor" stroke-width="2" fill="none"/>'),
+	note: SVG('<path d="M9 18V5l11-2v13" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="6" cy="18" r="3" fill="currentColor"/><circle cx="17" cy="16" r="3" fill="currentColor"/>'),
+};
+
+let toastTimer = 0;
+function toast(msg, err) {
+	const el = $('#toast'); el.textContent = msg; el.className = 'toast' + (err ? ' err' : '');
+	clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.add('hidden'), err ? 4200 : 2400);
+}
+function showModal(title, body) {
+	$('#modalTitle').textContent = title;
+	const b = $('#modalBody'); b.innerHTML = ''; typeof body === 'string' ? (b.innerHTML = body) : b.append(body);
+	$('#modal').classList.remove('hidden');
+}
+function closeModal() { $('#modal').classList.add('hidden'); }
+let popoverClose = null;
+function popover(cx, cy, title, fields, onOk) {
+	const el = $('#popover');
+	el.innerHTML = '';
+	el.append(h('h5', null, title));
+	const inputs = {}, rows = [];
+	for (const f of fields) {
+		let inp;
+		if (f.type === 'select') { inp = h('select', null, f.options.map(([v, l]) => h('option', { value: v }, l))); inp.value = f.value; }
+		else inp = h('input', { type: f.type === 'number' ? 'text' : 'text', value: f.value, inputmode: f.type === 'number' ? 'decimal' : undefined });
+		inputs[f.key] = inp;
+		const row = h('div', { class: 'row' }, h('label', null, f.label), h('div', { class: 'ctl' }, inp));
+		if (f.hint) row.title = f.hint;
+		rows.push([row, f]); el.append(row);
+		if (f.hint) el.append(h('div', { class: 'note', style: 'margin:-2px 0 4px 86px' }, f.hint));
+	}
+	const read = () => Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, i.value]));
+	const vis = () => { const v = read(); for (const [r, f] of rows) { const show = !f.show || f.show(v); r.style.display = show ? '' : 'none'; if (r.nextSibling && r.nextSibling.classList && r.nextSibling.classList.contains('note')) r.nextSibling.style.display = show ? '' : 'none'; } };
+	el.addEventListener('input', vis); el.addEventListener('change', vis); vis();
+	const close = () => { el.classList.add('hidden'); popoverClose = null; $('#timeline').focus(); };
+	const ok = () => { const v = read(); close(); onOk(v); };
+	el.append(h('div', { class: 'btns' }, h('button', { class: 'on', onclick: ok }, 'OK'), h('button', { onclick: close }, 'Cancel')));
+	el.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); ok(); } else if (e.key === 'Escape') { e.preventDefault(); close(); } e.stopPropagation(); };
+	el.classList.remove('hidden');
+	const r = el.getBoundingClientRect();
+	el.style.left = Math.max(6, Math.min(window.innerWidth - r.width - 6, cx + 8)) + 'px';
+	el.style.top = Math.max(6, Math.min(window.innerHeight - r.height - 6, cy - 10)) + 'px';
+	popoverClose = close;
+	const first = [...el.querySelectorAll('input,select')].find(i => i.offsetParent);
+	if (first) { first.focus(); if (first.select) first.select(); }
+}
+
+// ---------------------------------------------------------------------------
+const ed = new Editor();
+const tl = new TimelineView($('#timeline'), ed); ed.tl = tl;
+const pv = new Preview3D($('#preview'), ed);
+let currentTab = 'props';
+
+function fileNameNoExt() { return (ed.fileName || 'chart.ksh').replace(/\.ksh$/i, ''); }
+function updateTitle() {
+	const m = ed.chart.meta;
+	$('#docTitle').textContent = (ed.dirty ? '● ' : '') + ed.fileName + (m.title ? '  —  ' + m.title + (m.artist ? ' / ' + m.artist : '') : '');
+	document.title = (ed.dirty ? '● ' : '') + (m.title || fileNameNoExt()) + ' · KSM Chart Editor';
+}
+
+// ---------------------------------------------------------------- menus
+function buildMenus() {
+	const hasFS = 'showOpenFilePicker' in window;
+	const S = ed.settings;
+	const menus = [
+		['File', [
+			['New chart', 'Ctrl+N', newChart],
+			['Open chart / audio…', 'Ctrl+O', openDialog],
+			hasFS && ['Open chart folder…', '', openFolder],
+			['Load audio…', '', () => pickFiles('audio/*,.ogg,.mp3,.wav,.flac,.m4a,.opus')],
+			'-',
+			['Save .ksh', 'Ctrl+S', () => save(false)],
+			['Save .ksh as…', 'Ctrl+Shift+S', () => save(true)],
+			['Export for KSM v1 (bake curves)…', '', exportV1],
+			['View .ksh text…', '', viewKsh],
+			'-',
+			['Restore autosave', '', restoreAutosave],
+		]],
+		['Edit', [
+			['Undo', 'Ctrl+Z', () => ed.undo()], ['Redo', 'Ctrl+Y', () => ed.redo()], '-',
+			['Cut', 'Ctrl+X', () => ed.copy(true)], ['Copy', 'Ctrl+C', () => ed.copy()], ['Paste at cursor', 'Ctrl+V', () => ed.paste(false)], ['Paste mirrored', 'Ctrl+Shift+V', () => ed.paste(true)],
+			['Delete', 'Del', () => ed.deleteSelection()], ['Select all notes', 'Ctrl+A', () => ed.selectAll()], '-',
+			['Mirror selection', 'Ctrl+M', () => ed.mirrorSelection()], ['Move selection up a step', 'Alt+↑', () => ed.nudgeSelection(1)], ['Move selection down a step', 'Alt+↓', () => ed.nudgeSelection(-1)],
+		]],
+		['View', [
+			[() => (S.showPreview ? '✓ ' : '') + 'Preview', 'P', togglePreview],
+			[() => (S.showWave ? '✓ ' : '') + 'Waveform', '', () => { S.showWave = !S.showWave; ed.saveSettings(); tl.layout(); ed.requestDraw(); }],
+			'-',
+			...ALL_COLS.map(k => [() => (S.cols[k] ? '✓ ' : '') + COL_INFO[k].label + ' column', '', () => { S.cols[k] = !S.cols[k]; ed.saveSettings(); tl.layout(); ed.requestDraw(); }]),
+			'-',
+			['Zoom in', '+ / Ctrl+wheel', () => zoomBy(1.25)], ['Zoom out', '-', () => zoomBy(0.8)],
+		]],
+		['Play', [
+			['Play / pause', 'Space', () => ed.toggle()], ['Stop (back to start point)', 'Shift+Space', () => ed.stop()],
+			['Go to start', 'Home', () => moveCursor(0)], ['Go to last note', 'End', () => moveCursor(ed.chartEndTick())], '-',
+			...[1, 0.75, 0.5, 0.25].map(r => [() => (S.rate === r ? '✓ ' : '') + 'Speed ' + r * 100 + '%', '', () => setRate(r)]),
+			'-',
+			[() => (S.volMetro > 0 ? '✓ ' : '') + 'Metronome', 'M', toggleMetro],
+			[() => (S.hitsounds ? '✓ ' : '') + 'Hitsounds', 'H', toggleHits],
+		]],
+		['Help', [
+			['Controls & shortcuts', 'F1', showHelp],
+			['About KSH export', '', showAbout],
+		]],
+	];
+	const nav = $('#menus'); nav.innerHTML = '';
+	for (const [name, items] of menus) {
+		const list = h('div', { class: 'mlist' });
+		const m = h('div', { class: 'menu' }, h('div', { class: 'mlabel' }, name), list);
+		const fill = () => {
+			list.innerHTML = '';
+			for (const it of items) {
+				if (!it) continue;
+				if (it === '-') { list.append(h('div', { class: 'msep' })); continue; }
+				const [label, key, fn] = it;
+				list.append(h('div', { class: 'mitem', onmousedown: (e) => { e.preventDefault(); closeMenus(); fn(); } }, h('span', null, typeof label === 'function' ? label() : label), h('span', { class: 'k' }, key)));
+			}
+		};
+		m.querySelector('.mlabel').addEventListener('mousedown', (e) => { e.preventDefault(); const open = m.classList.contains('open'); closeMenus(); if (!open) { fill(); m.classList.add('open'); } });
+		m.addEventListener('mouseenter', () => { if (document.querySelector('.menu.open') && !m.classList.contains('open')) { closeMenus(); fill(); m.classList.add('open'); } });
+		nav.append(m);
+	}
+}
+function closeMenus() { document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open')); }
+document.addEventListener('mousedown', (e) => {
+	if (!e.target.closest('.menu')) closeMenus();
+	if (popoverClose && !e.target.closest('#popover') && e.target.id !== 'timeline') popoverClose();
+});
+
+// ---------------------------------------------------------------- toolbox + option bar
+function buildToolbox() {
+	const tb = $('#toolbox'); tb.innerHTML = '';
+	for (const t of TOOLS) {
+		tb.append(h('button', { class: 'tool' + (ed.tool === t.id ? ' on' : ''), title: t.label + '  [' + t.key + ']', onclick: () => setTool(t.id), html: SVG(t.icon) + `<span class="kk">${t.key}</span>` }));
+	}
+}
+function setTool(id) {
+	if (ed.drag) ed.cancelDrag();
+	ed.tool = id; ed.ghost = null; buildToolbox(); buildOptbar(); ed.requestDraw();
+}
+function divSelect() {
+	const s = h('select', { title: 'Grid snap (Ctrl+↑/↓)', onchange: (e) => { ed.div = +e.target.value; ed.requestDraw(); } }, DIVS.map(d => h('option', { value: d }, '1/' + d)));
+	s.value = ed.div; return s;
+}
+function buildOptbar() {
+	const ob = $('#optbar'); ob.innerHTML = '';
+	ob.append(h('div', { class: 'grp' }, h('label', null, 'Snap'), divSelect()));
+	ob.append(h('div', { class: 'sep' }));
+	const tool = ed.tool;
+	let hint = '';
+	if (tool === 'select') hint = 'Drag empty space: box select · Drag items: move (Alt = no snap) · Right-click: delete · Ctrl+C / Ctrl+V pastes at the cursor';
+	if (tool === 'bt') hint = 'Click: chip · Drag up/down: hold · Drag a hold\'s end to resize · Right-click: delete';
+	if (tool === 'fx') {
+		ob.append(h('div', { class: 'grp' }, h('label', null, 'New hold effect'), fxEditor(ed.fxEffect, (v) => { ed.fxEffect = v; })));
+		hint = 'Left half = FX-L, right half = FX-R · Click: chip · Drag: hold';
+	}
+	if (tool === 'laserL' || tool === 'laserR') {
+		const ls = h('select', { title: 'Laser position snap', onchange: (e) => { ed.laserSnap = +e.target.value; } }, LASER_SNAPS.map(o => h('option', { value: o.v }, o.label)));
+		ls.value = ed.laserSnap;
+		const cv = h('select', { title: 'Curve for new segments (KSM v2)', onchange: (e) => { ed.newCurve = e.target.value; } }, K.CURVE_PRESETS.map(p => h('option', { value: p.id }, p.label)));
+		cv.value = ed.newCurve;
+		const wide = h('button', { class: ed.newWide ? 'on' : '', title: 'New lasers are wide (laserrange 2x)', onclick: () => { ed.newWide = !ed.newWide; wide.classList.toggle('on', ed.newWide); } }, '2x wide');
+		ob.append(h('div', { class: 'grp' }, h('label', null, 'Positions'), ls), h('div', { class: 'grp' }, h('label', null, 'Curve'), cv), wide);
+		hint = 'Drag: draw a laser · Drag from its end point: continue · Drag sideways: slam · Drag a point: move · Alt: no snap';
+	}
+	ob.append(h('div', { class: 'hint' }, hint));
+}
+
+// FX effect editor: preset + params, or custom name
+function fxEditor(value, onChange, opts = {}) {
+	const defs = ed.chart.defs.filter(d => d.startsWith('#define_fx ')).map(d => d.split(/\s+/)[1]);
+	const parts = String(value || '').split(';');
+	let name = parts[0];
+	const preset = K.FX_EFFECTS.find(f => f.name === name);
+	const mode = !value ? '' : preset ? name : defs.includes(name) ? 'def:' + name : 'custom';
+	const wrap = h('span', { class: 'ctl', style: 'display:inline-flex;gap:4px;align-items:center' });
+	const sel = h('select', null, h('option', { value: '' }, '(no effect)'), K.FX_EFFECTS.map(f => h('option', { value: f.name }, f.name)), defs.map(d => h('option', { value: 'def:' + d }, d + ' (custom)')), h('option', { value: 'custom' }, 'Other…'));
+	sel.value = mode;
+	const params = h('span', { style: 'display:inline-flex;gap:3px' });
+	const custom = h('input', { type: 'text', value: mode === 'custom' ? value : '', placeholder: 'e.g. Retrigger;16', style: 'width:110px' });
+	const emit = () => {
+		const m = sel.value;
+		let s = '';
+		if (m === 'custom') s = custom.value.trim();
+		else if (m.startsWith('def:')) s = m.slice(4);
+		else if (m) { const vals = [...params.querySelectorAll('input')].map(i => i.value.trim()); s = [m, ...vals].join(';').replace(/;+$/, ''); }
+		onChange(s);
+	};
+	const render = () => {
+		params.innerHTML = '';
+		const p = K.FX_EFFECTS.find(f => f.name === sel.value);
+		if (p) p.params.forEach((pp, i) => params.append(h('input', { type: 'text', title: pp.label, value: (sel.value === name && parts[i + 1] !== undefined) ? parts[i + 1] : pp.def, style: 'width:38px', oninput: emit })));
+		custom.style.display = sel.value === 'custom' ? '' : 'none';
+	};
+	sel.addEventListener('change', () => { render(); emit(); });
+	custom.addEventListener('input', emit);
+	render();
+	wrap.append(sel, params, custom);
+	return wrap;
+}
+
+// ---------------------------------------------------------------- transport
+const TR = {};
+function buildTransport() {
+	const t = $('#transport'); t.innerHTML = '';
+	TR.start = h('button', { class: 'ibtn', title: 'Go to start (Home)', html: ICONS.start, onclick: () => moveCursor(0) });
+	TR.play = h('button', { class: 'ibtn play', title: 'Play / pause (Space)', html: ICONS.play, onclick: () => ed.toggle() });
+	TR.stop = h('button', { class: 'ibtn', title: 'Stop and return (Shift+Space)', html: ICONS.stop, onclick: () => ed.stop() });
+	TR.time = h('span', { class: 'time' }, '0:00.000');
+	TR.pos = h('span', { class: 'pos' }, '1.1');
+	TR.rate = h('select', { title: 'Playback speed', onchange: (e) => setRate(+e.target.value) }, [1, 0.75, 0.5, 0.25].map(r => h('option', { value: r }, r * 100 + '%')));
+	TR.rate.value = ed.settings.rate;
+	TR.metro = h('button', { class: 'ibtn' + (ed.settings.volMetro > 0 ? ' on' : ''), title: 'Metronome (M)', html: ICONS.metro, onclick: toggleMetro });
+	TR.hits = h('button', { class: 'ibtn' + (ed.settings.hitsounds ? ' on' : ''), title: 'Hitsounds (H)', html: ICONS.note, onclick: toggleHits });
+	TR.vol = h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: ed.settings.volMusic, title: 'Music volume', style: 'width:80px', oninput: (e) => { ed.settings.volMusic = +e.target.value; ed.applyAudioSettings(); ed.saveSettings(); } });
+	TR.audio = h('button', { title: 'Load the song audio (ogg / mp3 / wav)', onclick: () => pickFiles('audio/*,.ogg,.mp3,.wav,.flac,.m4a,.opus') }, 'Load audio…');
+	TR.zoom = h('span', { class: 'muted' });
+	t.append(TR.start, TR.play, TR.stop, h('div', { class: 'sep' }), TR.time, TR.pos, h('div', { class: 'sep' }), h('label', null, 'Speed'), TR.rate, TR.metro, TR.hits, h('label', null, 'Music'), TR.vol,
+		h('div', { class: 'spacer' }), TR.zoom, h('button', { title: 'Zoom out (-)', onclick: () => zoomBy(0.8) }, '−'), h('button', { title: 'Zoom in (+)', onclick: () => zoomBy(1.25) }, '+'), h('div', { class: 'sep' }), TR.audio);
+}
+let lastTr = '';
+function updateTransport() {
+	const ph = ed.playing ? ed.playTick : ed.cursor;
+	const key = Math.round(ph) + '|' + ed.playing + '|' + ed.version;
+	if (key === lastTr) return; lastTr = key;
+	TR.time.textContent = fmtTimeMs(ed.songTimeOf(ph));
+	TR.pos.textContent = posLabel(ed.timing, Math.max(0, Math.round(ph)), ed.div) + '  ♩' + K.fmtNum(ed.timing.bpmAt(ph));
+	TR.play.innerHTML = ed.playing ? ICONS.pause : ICONS.play;
+	TR.audio.textContent = ed.audio.buffer ? '♪ ' + ed.audio.fileName : 'Load audio…';
+	TR.audio.title = ed.audio.buffer ? 'Loaded ' + ed.audio.fileName + ' (' + fmtTime(ed.audio.duration) + '). Click to load a different file.' : 'Load the song audio (ogg / mp3 / wav)';
+	TR.zoom.textContent = 'Zoom ' + Math.round(tl.zoom * 100) + '%';
+}
+function setRate(r) { ed.settings.rate = r; ed.saveSettings(); TR.rate.value = r; if (ed.playing) { ed.pause(); ed.play(); } }
+function toggleMetro() { ed.settings.volMetro = ed.settings.volMetro > 0 ? 0 : 0.6; ed.applyAudioSettings(); ed.saveSettings(); TR.metro.classList.toggle('on', ed.settings.volMetro > 0); ed.nextBeat = null; }
+function toggleHits() { ed.settings.hitsounds = !ed.settings.hitsounds; ed.applyAudioSettings(); ed.saveSettings(); TR.hits.classList.toggle('on', ed.settings.hitsounds); ed.hitsDirty = true; }
+function togglePreview() { ed.settings.showPreview = !ed.settings.showPreview; ed.saveSettings(); $('#previewPane').classList.toggle('hidden', !ed.settings.showPreview); requestAnimationFrame(() => { tl.resize(); pv.resize(); ed.requestDraw(); }); }
+function zoomBy(f, anchorY) {
+	const y = anchorY !== undefined ? anchorY : tl.h * 0.5;
+	const t = tl.tickAt(y);
+	tl.zoom = K.clamp(tl.zoom * f, 0.15, 12);
+	tl.bottomTick = t - (tl.h - y) / tl.ppt;
+	ed.requestDraw();
+}
+function moveCursor(t) {
+	t = Math.max(0, Math.round(t));
+	if (ed.playing) { ed.seekTo(t); return; }
+	ed.cursor = t;
+	const y = tl.yOf(t);
+	if (y < tl.HEAD + 30 || y > tl.h - 30) tl.bottomTick = t - (tl.h * 0.25) / tl.ppt;
+	ed.requestDraw();
+}
+
+// ---------------------------------------------------------------- side tabs
+const TABS = [['props', 'Properties'], ['chart', 'Chart'], ['events', 'Events'], ['check', 'Check'], ['settings', 'Settings']];
+function buildTabs() {
+	const t = $('#tabs'); t.innerHTML = '';
+	const issues = K.validateChart(ed.chart).filter(w => w.level !== 'info').length;
+	for (const [id, label] of TABS) {
+		const b = h('button', { class: currentTab === id ? 'on' : '', onclick: () => { currentTab = id; buildTabs(); renderTab(); } }, label);
+		if (id === 'check' && issues) b.append(h('span', { class: 'badge' }, issues));
+		t.append(b);
+	}
+}
+let tabStale = false;
+function renderTab(force) {
+	const body = $('#tabBody');
+	if (!force && body.contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) { tabStale = true; return; }
+	tabStale = false;
+	const scroll = body.scrollTop;
+	body.innerHTML = '';
+	if (autosaveBanner) body.append(autosaveBanner);
+	({ props: renderProps, chart: renderChartTab, events: renderEvents, check: renderCheck, settings: renderSettings })[currentTab](body);
+	body.scrollTop = scroll;
+}
+$('#tabBody').addEventListener('focusout', () => setTimeout(() => { if (tabStale && !$('#tabBody').contains(document.activeElement)) renderTab(); }, 0));
+
+const sec = (title, ...kids) => h('div', { class: 'sec' }, h('h4', null, title), ...kids);
+const row = (label, ...ctl) => h('div', { class: 'row' }, h('label', { title: label }, label), h('div', { class: 'ctl' }, ...ctl));
+function numInput(value, onCommit, attrs = {}) {
+	return h('input', { type: 'text', inputmode: 'decimal', value, style: 'width:80px', ...attrs, onchange: (e) => onCommit(e.target.value) });
+}
+function laneName(kind, lane) { return kind === 'bt' ? 'BT-' + 'ABCD'[lane] : kind === 'fx' ? 'FX-' + 'LR'[lane] : lane ? 'Laser R' : 'Laser L'; }
+
+function renderProps(body) {
+	const items = ed.selected();
+	if (!items.length) {
+		const c = ed.chart;
+		const count = (lanes, f) => lanes.reduce((a, l) => a + l.filter(f).length, 0);
+		body.append(sec('Nothing selected',
+			h('div', { class: 'note' }, 'Click a note, laser point or keyframe to edit it here. Use the Select tool (1) to box-select.'),
+			row('BT chips / holds', h('span', null, count(c.bt, n => !n.l) + ' / ' + count(c.bt, n => n.l))),
+			row('FX chips / holds', h('span', null, count(c.fx, n => !n.l) + ' / ' + count(c.fx, n => n.l))),
+			row('Lasers L / R', h('span', null, c.laser[0].length + ' / ' + c.laser[1].length)),
+			row('Slams', h('span', null, c.laser.reduce((a, l) => a + l.reduce((b, s) => b + s.pts.filter(p => p.v !== p.vf).length, 0), 0))),
+			row('Camera keys', h('span', null, K.CAM_KEYS.reduce((a, k) => a + c.cam[k].length, 0) + c.tilt.length)),
+		));
+		body.append(sec('Quick start', h('div', { class: 'note', html:
+			'1. Load the song (bottom right) and set BPM by double-clicking the ♩ marker in the BPM column.<br>' +
+			'2. Line up the waveform with the beat lines using <b>Offset</b> in the Chart tab.<br>' +
+			'3. Place notes with tools 2–5. Add camera effects by clicking in the graph columns on the right.<br>' +
+			'4. Space plays from the red cursor. Ctrl+S saves the .ksh.' })));
+		return;
+	}
+	if (items.length > 1) {
+		const kinds = {};
+		for (const e of items) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
+		const fxHolds = items.filter(e => e.kind === 'fx' && e.item.l > 0);
+		body.append(sec(items.length + ' selected',
+			h('div', { class: 'note' }, Object.entries(kinds).map(([k, n]) => n + ' ' + ({ bt: 'BT', fx: 'FX', lpt: 'laser point', cam: 'keyframe', bpm: 'BPM', stop: 'stop', spin: 'spin', sig: 'beat' }[k] || k) + (n > 1 ? 's' : '')).join(', ')),
+			fxHolds.length ? row('FX hold effect', fxEditor(fxHolds[0].item.fx || '', (v) => ed.edit('Set FX effect', c => { for (const e of fxHolds) { const arr = c.fx[e.lane]; const n = arr.find(o => o.id === e.item.id); if (n) ed.replaceIn(arr, n.id, v ? { ...n, fx: v } : (({ fx, ...r }) => r)(n)); } }))) : null,
+			h('div', { class: 'btns' }, h('button', { onclick: () => ed.mirrorSelection() }, 'Mirror (Ctrl+M)'), h('button', { onclick: () => ed.copy() }, 'Copy'), h('button', { onclick: () => ed.deleteSelection() }, 'Delete'))));
+		return;
+	}
+	const e = items[0];
+	const pos = (t) => posLabel(ed.timing, t, ed.div) + '  (' + fmtTimeMs(ed.songTimeOf(t)) + ')';
+	if (e.kind === 'bt' || e.kind === 'fx') {
+		const n = e.item;
+		const setLen = (l) => ed.edit('Change length', c => { const arr = (e.kind === 'bt' ? c.bt : c.fx)[e.lane]; const o = arr.find(x => x.id === n.id); if (!o) return; const nn = { ...o, l: Math.max(0, l) }; if (nn.l === 0) delete nn.fx; ed.replaceIn(arr, o.id, nn); });
+		const s = sec((n.l ? 'Hold' : 'Chip') + ' · ' + laneName(e.kind, e.lane),
+			row('Position', h('span', null, pos(n.t))),
+			row('Length', numInput(n.l ? fmtLen(n.l) : '0', (v) => { const l = parseLen(v); if (l >= 0) setLen(l); }, { title: 'Measures, e.g. 1/4, 3/8, 1' }), h('span', { class: 'muted' }, 'measures')),
+		);
+		if (e.kind === 'fx' && n.l > 0) s.append(row('Effect', fxEditor(n.fx || '', (v) => ed.edit('Set FX effect', c => { const arr = c.fx[e.lane]; const o = arr.find(x => x.id === n.id); if (o) { const nn = { ...o }; if (v) nn.fx = v; else delete nn.fx; ed.replaceIn(arr, o.id, nn); } }))));
+		if (e.kind === 'fx' && !n.l) {
+			const [snd, vol] = (n.se || '').split(';');
+			const sel = h('select', null, h('option', { value: '' }, '(none)'), K.FX_CHIP_SOUNDS.map(s2 => h('option', { value: s2 }, s2)));
+			sel.value = K.FX_CHIP_SOUNDS.includes(snd) ? snd : '';
+			const volI = numInput(vol || '100', () => apply(), { style: 'width:50px' });
+			const apply = () => ed.edit('FX chip sound', c => { const arr = c.fx[e.lane]; const o = arr.find(x => x.id === n.id); if (!o) return; const nn = { ...o }; if (sel.value) nn.se = sel.value + (volI.value && volI.value !== '100' ? ';' + volI.value : ''); else delete nn.se; ed.replaceIn(arr, o.id, nn); });
+			sel.addEventListener('change', apply);
+			s.append(row('Key sound', sel, volI, h('span', { class: 'muted' }, '%')));
+		}
+		s.append(h('div', { class: 'btns' }, n.l ? h('button', { onclick: () => setLen(0) }, 'Make chip') : h('button', { onclick: () => setLen(ed.step) }, 'Make hold'), h('button', { onclick: () => ed.deleteSelection() }, 'Delete')));
+		body.append(s);
+		return;
+	}
+	if (e.kind === 'lpt') {
+		const s = e.sec, p = e.item, t = s.t + p.ry, lane = e.lane;
+		const isSlam = p.v !== p.vf, isLast = e.idx === s.pts.length - 1;
+		const upd = (label, fn) => ed.edit(label, c => { const arr = c.laser[lane]; const so = arr.find(x => x.id === s.id); if (!so) return; const pts = so.pts.slice(); const i = pts.findIndex(x => x.id === p.id); if (i < 0) return; const r = fn({ ...pts[i] }, so); if (r === false) return; pts[i] = r; ed.replaceIn(arr, so.id, { ...so, pts }); });
+		const vIn = numInput(p.v, (v) => upd('Laser position', q => { const x = K.clamp(parseInt(v, 10) || 0, 0, 50); if (q.v === q.vf) q.vf = x; q.v = x; return q; }), { style: 'width:50px' });
+		const slamChk = h('input', { type: 'checkbox', checked: isSlam, onchange: (ev) => upd(ev.target.checked ? 'Make slam' : 'Remove slam', q => { q.vf = ev.target.checked ? (q.v <= 25 ? 50 : 0) : q.v; return q; }) });
+		const vfIn = numInput(p.vf, (v) => upd('Slam end', q => { q.vf = K.clamp(parseInt(v, 10) || 0, 0, 50); return q; }), { style: 'width:50px', disabled: !isSlam });
+		const box = sec(laneName('laser', lane) + ' point ' + (e.idx + 1) + '/' + s.pts.length,
+			row('Position', h('span', null, pos(t))),
+			row('Value (0–50)', vIn, h('span', { class: 'muted' }, '0 = left, 50 = right')),
+			row('Slam', slamChk, h('span', { class: 'muted' }, 'to'), vfIn));
+		if (!isLast) {
+			const cur = K.CURVE_PRESETS.find(cp => Math.abs(cp.a - (p.a || 0)) < 1e-6 && Math.abs(cp.b - (p.b || 0)) < 1e-6);
+			const cs = h('select', { onchange: (ev) => { const cp = K.CURVE_PRESETS.find(x => x.id === ev.target.value); if (cp) upd('Laser curve', q => { q.a = cp.a; q.b = cp.b; return q; }); } }, K.CURVE_PRESETS.map(cp => h('option', { value: cp.id }, cp.label)), h('option', { value: 'custom' }, 'Custom (a;b)'));
+			cs.value = cur ? cur.id : 'custom';
+			const ab = numInput((p.a || 0) + ';' + (p.b || 0), (v) => { const [a, b] = v.split(';').map(Number); if (Number.isFinite(a) && Number.isFinite(b)) upd('Laser curve', q => { q.a = K.clamp(a, 0, 1); q.b = K.clamp(b, 0, 1); return q; }); }, { style: 'width:70px', title: 'Quadratic bezier control point a;b (0–1). KSM v2 only.' });
+			box.append(row('Curve to next', cs, ab));
+		}
+		if (isSlam) {
+			const seCur = ed.chart.slamSE.find(x => x.t === t);
+			const seSel = h('select', { onchange: (ev) => ed.edit('Slam sound', c => { c.slamSE = c.slamSE.filter(x => x.t !== t); if (ev.target.value) K.insertSorted(c.slamSE, { id: K.nid(), t, v: ev.target.value }); }) }, h('option', { value: '' }, '(default)'), K.SLAM_SOUNDS.map(x => h('option', { value: x }, x)));
+			seSel.value = seCur ? seCur.v : '';
+			box.append(row('Slam sound', seSel));
+		}
+		body.append(box);
+		// spin / swing editor on this tick
+		const sp = ed.chart.spins.find(x => x.t === t);
+		const spSel = h('select', null, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l)));
+		spSel.value = spinCode(sp);
+		const lenIn = numInput(sp ? fmtLen(sp.l) : '1', () => applySpin(), { style: 'width:56px', title: 'Length in measures (1 = one 4/4 measure)' });
+		const amp = numInput(sp ? sp.amp : 250, () => applySpin(), { style: 'width:46px', title: 'Swing scale (default 250)' });
+		const rep = numInput(sp ? sp.rep : 3, () => applySpin(), { style: 'width:36px', title: 'Swing repeats (default 3)' });
+		const dec = h('select', { title: 'Swing decay', onchange: () => applySpin() }, [['0', 'no decay'], ['1', 'linear'], ['2', 'squared']].map(([v, l]) => h('option', { value: v }, l)));
+		dec.value = sp ? String(sp.dec) : '2';
+		const applySpin = () => { const l = parseLen(lenIn.value); ed.setSpinAt(t, spSel.value, l > 0 ? l : 960, { amp: parseInt(amp.value, 10) || 250, rep: parseInt(rep.value, 10) || 3, dec: +dec.value }); };
+		spSel.addEventListener('change', () => { if (spSel.value && !sp && isSlam) { /* suggest direction from slam */ } applySpin(); });
+		const spinSec = sec('Lane spin / swing (screen shake)',
+			h('div', { class: 'note' }, isSlam ? 'Triggered by this slam in KSM.' : 'Spins are normally placed on a slam.'),
+			row('Effect', spSel), row('Length', lenIn, h('span', { class: 'muted' }, 'measures')));
+		if (sp && sp.kind === 'swing') spinSec.append(row('Swing', amp, rep, dec));
+		body.append(spinSec);
+		const wide = h('input', { type: 'checkbox', checked: !!s.wide, onchange: (ev) => ed.edit('Wide laser', c => { const arr = c.laser[lane]; const so = arr.find(x => x.id === s.id); if (so) ed.replaceIn(arr, so.id, { ...so, wide: ev.target.checked }); }) });
+		body.append(sec('Whole laser',
+			row('Starts', h('span', null, pos(s.t))),
+			row('Wide (2x)', wide, h('span', { class: 'muted' }, 'laserrange_' + (lane ? 'r' : 'l') + '=2x')),
+			h('div', { class: 'btns' },
+				h('button', { onclick: () => ed.setSel(s.pts.map(q => q.id)) }, 'Select all points'),
+				h('button', { onclick: () => ed.edit('Delete point', () => ed.deleteLaserPoints(new Set([p.id]))) }, 'Delete point'),
+				h('button', { onclick: () => ed.edit('Delete laser', c => { c.laser[lane] = c.laser[lane].filter(x => x.id !== s.id); }) }, 'Delete laser'))));
+		return;
+	}
+	if (e.kind === 'cam') {
+		const p = e.item, key = e.key, isTilt = key === 'tilt';
+		const upd = (label, fn) => ed.edit(label, () => { const arr = ed.camArr(key).slice(); const o = arr.find(x => x.id === p.id); if (!o) return; const np = fn({ ...o }); ed.replaceIn(arr, o.id, np); ed.setCamArr(key, arr); });
+		const box = sec(COL_INFO[key].label + ' keyframe', row('Position', h('span', null, pos(p.t))));
+		if (isTilt) {
+			const mode = h('select', { onchange: (ev) => upd('Tilt type', q => { q.v = ev.target.value === 'manual' ? 0 : ev.target.value; if (typeof q.v !== 'number') { delete q.vf; q.a = 0; q.b = 0; } return q; }) }, h('option', { value: 'manual' }, 'Manual value'), K.TILT_AUTO.map(a => h('option', { value: a }, 'Auto: ' + a)));
+			mode.value = typeof p.v === 'number' ? 'manual' : p.v;
+			box.append(row('Type', mode));
+			if (typeof p.v !== 'number') box.append(h('div', { class: 'note' }, 'Auto tilt follows the lasers. "keep_" types keep the tilt until it gets bigger; "zero" disables tilt.'));
+		}
+		if (typeof p.v === 'number') {
+			box.append(row('Value', numInput(K.fmtNum(p.v), (v) => upd('Keyframe value', q => { q.v = parseFloat(v) || 0; return q; })), h('span', { class: 'muted' }, isTilt ? '1 = normal max tilt' : key === 'rotation_deg' ? 'degrees' : key === 'scroll_speed' ? '× speed' : key === 'zoom_top' ? '2400 = 360°' : '')));
+			const jump = h('input', { type: 'checkbox', checked: p.vf !== undefined, onchange: (ev) => upd('Instant change', q => { if (ev.target.checked) q.vf = typeof q.v === 'number' ? q.v : 0; else delete q.vf; return q; }) });
+			const vf = numInput(p.vf !== undefined ? (typeof p.vf === 'number' ? K.fmtNum(p.vf) : p.vf) : '', (v) => upd('Instant change', q => { const x = parseFloat(v); q.vf = isTilt && isNaN(x) ? v : (x || 0); return q; }), { disabled: p.vf === undefined });
+			box.append(row('Jump to', jump, vf), h('div', { class: 'note' }, 'Jump = the value changes instantly at this keyframe (two lines in KSH).'));
+			const cur = K.CURVE_PRESETS.find(cp => Math.abs(cp.a - (p.a || 0)) < 1e-6 && Math.abs(cp.b - (p.b || 0)) < 1e-6);
+			const cs = h('select', { onchange: (ev) => { const cp = K.CURVE_PRESETS.find(x => x.id === ev.target.value); if (cp) upd('Curve', q => { q.a = cp.a; q.b = cp.b; return q; }); } }, K.CURVE_PRESETS.map(cp => h('option', { value: cp.id }, cp.label)), h('option', { value: 'custom' }, 'Custom'));
+			cs.value = cur ? cur.id : 'custom';
+			box.append(row('Ease to next', cs), h('div', { class: 'note' }, 'Curves need KSM v2. "Export for KSM v1" converts them to steps.'));
+		}
+		box.append(h('div', { class: 'btns' }, h('button', { onclick: () => ed.deleteSelection() }, 'Delete keyframe')));
+		body.append(box);
+		return;
+	}
+	if (e.kind === 'bpm') { body.append(sec('BPM change', row('Position', h('span', null, pos(e.item.t))), row('BPM', numInput(K.fmtNum(e.item.v), (v) => { const b = parseFloat(v); if (b > 0) ed.setBpmAt(e.item.t, b); })))); return; }
+	if (e.kind === 'stop') { body.append(sec('Stop', row('Position', h('span', null, pos(e.item.t))), row('Length', numInput(fmtLen(e.item.l), (v) => { const l = parseLen(v); if (l > 0) ed.edit('Edit stop', c => ed.replaceIn(c.stops, e.item.id, { ...e.item, l })); }), h('span', { class: 'muted' }, 'measures')))); return; }
+	if (e.kind === 'sig') { body.append(sec('Time signature', row('Measure', h('span', null, e.item.m + 1)), row('Beats', numInput(e.item.n + '/' + e.item.d, (v) => { const [n, d] = v.split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) ed.setSigAt(e.item.m, n, d); })))); return; }
+	if (e.kind === 'spin') { const s = e.item; body.append(sec('Spin / swing', row('Position', h('span', null, pos(s.t))), row('Effect', (() => { const sl = h('select', { onchange: (ev) => ed.setSpinAt(s.t, ev.target.value, s.l, s) }, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l))); sl.value = spinCode(s); return sl; })()), row('Length', numInput(fmtLen(s.l), (v) => { const l = parseLen(v); if (l > 0) ed.setSpinAt(s.t, spinCode(s), l, s); }), h('span', { class: 'muted' }, 'measures')))); }
+}
+
+function renderChartTab(body) {
+	const m = ed.chart.meta;
+	const set = (k, v) => { if (m[k] === v) return; ed.edit('Edit ' + k, c => { c.meta[k] = v; }); updateTitle(); };
+	const txt = (k, ph, w) => h('input', { type: 'text', value: m[k], placeholder: ph || '', style: w ? 'width:' + w : null, onchange: (e) => set(k, e.target.value) });
+	const pick = (k, opts, allowCustom) => {
+		const s = h('select', { onchange: (e) => { if (e.target.value === '__custom') { const v = prompt('Value for ' + k + ':', m[k]); if (v !== null) set(k, v); else renderTab(true); } else set(k, e.target.value); } }, opts.map(o => h('option', { value: o }, o || '(none)')), allowCustom ? h('option', { value: '__custom' }, 'Custom file…') : null);
+		if (!opts.includes(m[k])) s.prepend(h('option', { value: m[k] }, m[k]));
+		s.value = m[k]; return s;
+	};
+	const off = h('input', { type: 'text', inputmode: 'numeric', value: m.o, style: 'width:70px', onchange: (e) => set('o', String(parseInt(e.target.value, 10) || 0)) });
+	const nudge = (d) => h('button', { title: (d > 0 ? '+' : '') + d + ' ms', onclick: () => set('o', String((parseInt(m.o, 10) || 0) + d)) }, (d > 0 ? '+' : '') + d);
+	body.append(sec('Song',
+		row('Title', txt('title')), row('Title (romaji)', txt('title_translit', 'optional')),
+		row('Artist', txt('artist')), row('Artist (romaji)', txt('artist_translit', 'optional')),
+		row('Music file (m)', txt('m', 'song.ogg'), h('button', { onclick: () => pickFiles('audio/*,.ogg,.mp3,.wav,.flac,.m4a,.opus') }, 'Load')),
+		row('Music volume', txt('mvol', '100', '60px'), h('span', { class: 'muted' }, '%')),
+		row('Offset (o)', off, h('span', { class: 'muted' }, 'ms')),
+		h('div', { class: 'btns', style: 'margin:0 0 4px 114px' }, nudge(-10), nudge(-1), nudge(1), nudge(10)),
+		h('div', { class: 'note' }, 'Offset = where beat 1 of measure 1 is in the audio. Raise it if notes are early. Watch the waveform line up with the measure lines.'),
+	));
+	body.append(sec('Chart',
+		row('Difficulty', pick('difficulty', K.DIFFICULTIES)),
+		row('Level', h('input', { type: 'number', min: 1, max: 20, value: m.level, onchange: (e) => set('level', String(K.clamp(parseInt(e.target.value, 10) || 1, 1, 20))) })),
+		row('Chart author', txt('effect')),
+		row('Jacket file', txt('jacket', 'jacket.png')), row('Illustrator', txt('illustrator')),
+		row('Display BPM', txt('t', K.autoDispBpm(ed.chart) + ' (auto)')),
+		row('Hi-speed base BPM', txt('to', 'auto')),
+		row('Info text', txt('information', 'shown in song select')),
+	));
+	body.append(sec('Song select preview',
+		row('Start (po)', txt('po', '0', '80px'), h('span', { class: 'muted' }, 'ms'), h('button', { title: 'Use the cursor position', onclick: () => set('po', String(Math.max(0, Math.round(ed.songTimeOf(ed.cursor) * 1000)))) }, '← cursor')),
+		row('Length (plength)', txt('plength', '15000', '80px'), h('span', { class: 'muted' }, 'ms'))));
+	body.append(sec('Background',
+		row('Background', pick('bg', K.BG_PRESETS, true)), row('Layer', pick('layer', ['', ...K.LAYER_PRESETS], true)),
+		row('Video (v)', txt('v', 'optional')), row('Video offset', txt('vo', '0', '70px'))));
+	const auto = h('input', { type: 'checkbox', checked: m.chokkakuautovol === '1', onchange: (e) => set('chokkakuautovol', e.target.checked ? '1' : '0') });
+	body.append(sec('Laser sound',
+		row('Laser filter', pick('filtertype', K.LASER_FILTERS)), row('Filter gain', txt('pfiltergain', '50', '60px')),
+		row('Filter delay', txt('pfilterdelay', '40', '60px'), h('span', { class: 'muted' }, 'ms')),
+		row('Slam volume', txt('chokkakuvol', '50', '60px'), h('span', { class: 'muted' }, '%')), row('Auto slam volume', auto),
+		row('Gauge total', txt('total', 'auto', '70px'))));
+	const defs = h('textarea', { rows: 4, placeholder: '#define_fx Name type=Retrigger;waveLength=1/16', onchange: (e) => ed.edit('Custom effects', c => { c.defs = e.target.value.split(/\r?\n/).map(s => s.trim()).filter(s => s.startsWith('#define_')); }) });
+	defs.value = ed.chart.defs.join('\n');
+	const extra = h('textarea', { rows: 3, placeholder: 'key=value', onchange: (e) => ed.edit('Extra header', c => { c.metaExtra = e.target.value.split(/\r?\n/).filter(s => s.includes('=')).map(s => [s.slice(0, s.indexOf('=')), s.slice(s.indexOf('=') + 1)]); }) });
+	extra.value = ed.chart.metaExtra.map(([k, v]) => k + '=' + v).join('\n');
+	body.append(sec('Advanced',
+		row('KSH version', txt('ver', '171', '60px'), txt('ver_compat', 'compat', '60px')),
+		h('div', { class: 'note' }, 'Custom audio effects (#define_fx / #define_filter):'), defs,
+		h('div', { class: 'note' }, 'Other header lines kept as-is:'), extra));
+}
+
+function renderEvents(body) {
+	const c = ed.chart, list = [];
+	for (const b of c.bpm) list.push([b.t, 'BPM ' + K.fmtNum(b.v), () => { c.bpm.length > 1 && b.t !== 0 && ed.edit('Delete BPM', cc => { cc.bpm = cc.bpm.filter(x => x.id !== b.id); }); }, b.t === 0]);
+	for (const s of c.sig) list.push([ed.timing.measureStart(s.m), 'Time signature ' + s.n + '/' + s.d + ' (measure ' + (s.m + 1) + ')', () => s.m && ed.edit('Delete time signature', cc => { cc.sig = cc.sig.filter(x => x.id !== s.id); }), s.m === 0]);
+	for (const s of c.stops) list.push([s.t, 'Stop ' + fmtLen(s.l), () => ed.edit('Delete stop', cc => { cc.stops = cc.stops.filter(x => x.id !== s.id); })]);
+	for (const s of c.spins) list.push([s.t, SPIN_OPTIONS.find(o => o[0] === spinCode(s))[1] + ' · ' + fmtLen(s.l), () => ed.edit('Delete spin', cc => { cc.spins = cc.spins.filter(x => x.id !== s.id); })]);
+	const simple = (key, label) => { for (const e of c[key]) list.push([e.t, label + ' ' + e.v, () => ed.edit('Delete ' + label, cc => { cc[key] = cc[key].filter(x => x.id !== e.id); })]); };
+	simple('filterType', 'Laser filter →'); simple('slamVol', 'Slam volume →'); simple('pfilterGain', 'Filter gain →'); simple('slamSE', 'Slam sound');
+	for (const r of c.raw) list.push([r.t, r.k === '//' ? '// ' + r.v : r.k ? r.k + '=' + r.v : r.v, () => ed.edit('Delete line', cc => { cc.raw = cc.raw.filter(x => x.id !== r.id); })]);
+	list.sort((a, b) => a[0] - b[0]);
+	const at = () => ed.snapT(ed.cursor);
+	const addSimple = (key, label, def) => { const v = prompt(label + ' at the cursor:', def); if (v !== null && v !== '') ed.edit('Add ' + label, cc => { cc[key] = cc[key].filter(x => x.t !== at()); K.insertSorted(cc[key], { id: K.nid(), t: at(), v }); }); };
+	body.append(sec('Add at cursor (' + posLabel(ed.timing, ed.cursor, ed.div) + ')',
+		h('div', { class: 'btns' },
+			h('button', { onclick: () => { const r = tl.cv.getBoundingClientRect(); ed.addTimingPopover(at(), r.left + tl.timingL, r.top + tl.yOf(at())); } }, 'BPM / beat / stop / spin…'),
+			h('button', { title: 'Laser audio filter from here on', onclick: () => addSimple('filterType', 'Laser filter (peak, lpf1, hpf1, bitc)', 'hpf1') }, 'Laser filter'),
+			h('button', { onclick: () => addSimple('slamVol', 'Slam volume %', '50') }, 'Slam volume'),
+			h('button', { onclick: () => addSimple('pfilterGain', 'Filter gain (0-100)', '50') }, 'Filter gain'),
+			h('button', { onclick: () => { const v = prompt('Comment:'); if (v) ed.edit('Comment', cc => K.insertSorted(cc.raw, { id: K.nid(), t: at(), k: '//', v })); } }, 'Comment'),
+			h('button', { title: 'Any KSH option line, e.g. fx:2r90:waveLength=1/8', onclick: () => { const v = prompt('KSH option line (key=value):'); if (v && v.includes('=')) ed.edit('Option line', cc => K.insertSorted(cc.raw, { id: K.nid(), t: at(), k: v.slice(0, v.indexOf('=')), v: v.slice(v.indexOf('=') + 1) })); } }, 'Raw option'))));
+	const box = h('div', { class: 'list' });
+	for (const [t, label, del, locked] of list) {
+		box.append(h('div', { class: 'li', onclick: () => moveCursor(t) }, h('span', { class: 't' }, posLabel(ed.timing, t, ed.div)), h('span', { class: 'msg' }, label), locked ? null : h('button', { class: 'x', title: 'Delete', onclick: (e) => { e.stopPropagation(); del(); } }, '×')));
+	}
+	body.append(sec('Timing & effect events (' + list.length + ')', box, h('div', { class: 'note' }, 'Click an event to move the cursor there. Camera keyframes live in the graph columns.')));
+}
+
+function renderCheck(body) {
+	const w = K.validateChart(ed.chart);
+	const box = h('div', { class: 'list' });
+	if (!w.length) box.append(h('div', { class: 'li' }, h('span', { class: 'msg', style: 'color:var(--ok)' }, 'No problems found.')));
+	for (const it of w) box.append(h('div', { class: 'li', onclick: () => moveCursor(it.t) }, h('span', { class: 't' }, posLabel(ed.timing, it.t, ed.div)), h('span', { class: 'msg lvl-' + it.level }, it.msg)));
+	body.append(sec('Chart check', h('div', { class: 'note' }, 'Things that would change or break when the chart is saved as .ksh or played in KSM.'), box));
+	const end = ed.chartEndTick();
+	body.append(sec('Stats', row('Chart length', h('span', null, fmtTime(ed.songTimeOf(end)))), row('Measures', h('span', null, ed.timing.measureOf(end).m + 1)),
+		row('Audio', h('span', null, ed.audio.buffer ? ed.audio.fileName + ' · ' + fmtTime(ed.audio.duration) + ' · ' + ed.audio.buffer.sampleRate + ' Hz' : 'not loaded'))));
+}
+
+function renderSettings(body) {
+	const S = ed.settings;
+	const save = () => { ed.saveSettings(); ed.applyAudioSettings(); tl.layout(); ed.requestDraw(); };
+	const slider = (k, min, max, step, fmt) => { const out = h('span', { class: 'muted', style: 'min-width:42px' }, fmt(S[k])); return [h('input', { type: 'range', min, max, step, value: S[k], style: 'flex:1', oninput: (e) => { S[k] = +e.target.value; out.textContent = fmt(S[k]); save(); } }), out]; };
+	const chk = (k, after) => h('input', { type: 'checkbox', checked: S[k], onchange: (e) => { S[k] = e.target.checked; save(); if (after) after(); } });
+	const pct = v => Math.round(v * 100) + '%';
+	body.append(sec('Audio',
+		row('Music volume', ...slider('volMusic', 0, 1, 0.01, pct)),
+		row('Hitsound volume', ...slider('volHit', 0, 1, 0.01, pct)),
+		row('Metronome volume', ...slider('volMetro', 0, 1, 0.01, pct)),
+		row('Hitsounds', chk('hitsounds', () => TR.hits.classList.toggle('on', S.hitsounds))),
+		row('Click when placing', chk('placeSound')),
+		row('Visual latency', ...slider('latencyMs', -150, 150, 1, v => v + ' ms')),
+		h('div', { class: 'note' }, 'Playback timing comes from the audio clock and already corrects for your output device. Only adjust latency if the cursor still looks early (+) or late (−) against what you hear, e.g. with Bluetooth headphones.')));
+	body.append(sec('View',
+		row('Lane width', ...slider('laneW', 26, 80, 1, v => v + ' px')),
+		row('Preview note speed', ...slider('previewBeats', 2, 12, 0.5, v => v + ' beats')),
+		row('Show waveform', chk('showWave')),
+		row('Show preview', chk('showPreview', () => { $('#previewPane').classList.toggle('hidden', !S.showPreview); requestAnimationFrame(() => { tl.resize(); pv.resize(); }); })),
+		row('Follow playback', chk('follow')),
+		row('Invert mouse wheel', chk('invertWheel'))));
+	body.append(sec('Saving', row('Autosave (browser)', chk('autosave')), h('div', { class: 'note' }, 'Autosave keeps a copy of the chart in this browser every 15 s. Use File → Restore autosave to get it back.')));
+}
+
+// ---------------------------------------------------------------- files
+function pickFiles(accept) { const fi = $('#fileInput'); fi.accept = accept || '.ksh,.ogg,.mp3,.wav,.flac,.m4a,.opus,audio/*'; fi.value = ''; fi.click(); }
+$('#fileInput').addEventListener('change', (e) => { if (e.target.files.length) openFiles([...e.target.files]); });
+const AUDIO_RE = /\.(ogg|mp3|wav|flac|m4a|opus|aac|webm)$/i;
+function confirmDiscard() { return !ed.dirty || confirm('Discard unsaved changes to ' + ed.fileName + '?'); }
+async function openFiles(files, handles) {
+	const chartFile = files.find(f => /\.ksh$/i.test(f.name));
+	const kson = files.find(f => /\.kson$/i.test(f.name));
+	if (kson && !chartFile) toast('.kson is not supported yet; please open the .ksh version.', true);
+	let audio = files.find(f => AUDIO_RE.test(f.name));
+	if (chartFile) {
+		if (!confirmDiscard()) return;
+		const r = K.importKsh(new Uint8Array(await chartFile.arrayBuffer()));
+		ed.loadChart(r.chart, chartFile.name);
+		ed.fileHandle = handles ? handles.get(chartFile.name) || null : null; ed.dirHandle = null;
+		tl.bottomTick = -tl.h * 0.15 / tl.ppt;
+		if (r.warnings.length) toast(r.warnings.length + ' note(s) while loading: ' + r.warnings[0].msg);
+		else toast('Opened ' + chartFile.name + (r.encoding === 'shift_jis' ? ' (Shift-JIS)' : ''));
+		const want = (ed.chart.meta.m || '').split(';')[0];
+		if (!audio && want) { const a2 = files.find(f => f.name === want); if (a2) audio = a2; }
+		if (!audio && want && !(ed.audio.buffer && ed.audio.fileName === want)) setTimeout(() => toast('This chart uses "' + want + '". Drop it here or use Load audio.'), 2600);
+	}
+	if (audio) await loadAudio(audio);
+}
+async function loadAudio(file) {
+	try {
+		toast('Decoding ' + file.name + '…');
+		await ed.audio.load(await file.arrayBuffer(), file.name);
+		if (!ed.chart.meta.m) ed.edit('Set music file', c => { c.meta.m = file.name; });
+		toast('Loaded ' + file.name + ' (' + fmtTime(ed.audio.duration) + ')');
+		lastTr = ''; ed.requestDraw(); renderTab();
+	} catch (e) { toast('Could not decode ' + file.name + ': ' + (e.message || e) + '. Try .ogg, .mp3 or .wav.', true); }
+}
+async function openDialog() {
+	if ('showOpenFilePicker' in window) {
+		try {
+			const hs = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'KSH chart / audio', accept: { 'text/plain': ['.ksh'], 'audio/*': ['.ogg', '.mp3', '.wav', '.flac', '.m4a', '.opus'] } }] });
+			const files = await Promise.all(hs.map(x => x.getFile()));
+			const map = new Map(hs.map((x, i) => [files[i].name, x]));
+			return openFiles(files, map);
+		} catch (e) { if (e.name === 'AbortError') return; }
+	}
+	pickFiles();
+}
+async function openFolder() {
+	try {
+		const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+		const kshs = [], all = new Map();
+		for await (const [name, hd] of dir.entries()) { if (hd.kind !== 'file') continue; all.set(name, hd); if (/\.ksh$/i.test(name)) kshs.push(name); }
+		if (!kshs.length) return toast('No .ksh files in that folder.', true);
+		const openOne = async (name) => {
+			closeModal();
+			if (!confirmDiscard()) return;
+			const f = await all.get(name).getFile();
+			const r = K.importKsh(new Uint8Array(await f.arrayBuffer()));
+			ed.loadChart(r.chart, name); ed.fileHandle = all.get(name); ed.dirHandle = dir;
+			tl.bottomTick = -tl.h * 0.15 / tl.ppt;
+			const want = (ed.chart.meta.m || '').split(';')[0];
+			if (want && all.has(want)) await loadAudio(await all.get(want).getFile());
+			else toast('Opened ' + name + (want ? ' (audio "' + want + '" not found in folder)' : ''));
+		};
+		if (kshs.length === 1) return openOne(kshs[0]);
+		const box = h('div', { class: 'list' }, kshs.sort().map(n => h('div', { class: 'li', onclick: () => openOne(n) }, h('span', { class: 'msg' }, n))));
+		showModal('Choose a chart', box);
+	} catch (e) { if (e.name !== 'AbortError') toast('Could not open folder: ' + e.message, true); }
+}
+function download(name, text) {
+	const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' })), download: name });
+	document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+function exportWarnings() {
+	const w = K.validateChart(ed.chart).filter(x => x.level === 'error');
+	if (w.length) toast('Saved, but the Check tab has ' + w.length + ' problem(s) to look at.', true);
+}
+async function save(as) {
+	const { text } = K.exportKsh(ed.chart);
+	let name = ed.fileName && ed.fileName !== 'untitled.ksh' ? ed.fileName : ((ed.chart.meta.title || 'chart').replace(/[\\/:*?"<>|]+/g, '_') + '.ksh');
+	try {
+		if (!as && ed.fileHandle && ed.fileHandle.createWritable) {
+			const w = await ed.fileHandle.createWritable(); await w.write(text); await w.close();
+			ed.dirty = false; updateTitle(); toast('Saved ' + ed.fileName); exportWarnings(); clearAutosave(); return;
+		}
+		if ('showSaveFilePicker' in window) {
+			const hd = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'KSH chart', accept: { 'text/plain': ['.ksh'] } }] });
+			const w = await hd.createWritable(); await w.write(text); await w.close();
+			ed.fileHandle = hd; ed.fileName = hd.name; ed.dirty = false; updateTitle(); toast('Saved ' + hd.name); exportWarnings(); clearAutosave(); return;
+		}
+	} catch (e) { if (e.name === 'AbortError') return; }
+	download(name, text);
+	ed.fileName = name; ed.dirty = false; updateTitle(); toast('Downloaded ' + name); exportWarnings(); clearAutosave();
+}
+function exportV1() {
+	const r = K.exportKsh(ed.chart, { v1: true });
+	download(fileNameNoExt() + '_ksm_v1.ksh', r.text);
+	toast(r.warnings.length ? 'Exported for KSM v1. ' + r.warnings.map(w => w.msg).join(' ') : 'Exported for KSM v1 (nothing needed converting).');
+}
+function viewKsh() {
+	const { text } = K.exportKsh(ed.chart);
+	const ta = h('textarea', { rows: 28, readonly: true, style: 'height:60vh' }); ta.value = text.replace(/^﻿/, '');
+	showModal('.ksh output', h('div', null, h('div', { class: 'note' }, 'This is exactly what Save writes (UTF-8 with BOM, CRLF line endings).'), ta));
+}
+function newChart() {
+	if (!confirmDiscard()) return;
+	ed.loadChart(K.newChart(), 'untitled.ksh'); ed.fileHandle = null; ed.dirHandle = null;
+	tl.bottomTick = -tl.h * 0.15 / tl.ppt;
+}
+
+// ---------------------------------------------------------------- autosave
+const AS_KEY = 'ksmed.autosave';
+let autosaveBanner = null;
+function doAutosave() {
+	if (!ed.settings.autosave || !ed.dirty) return;
+	try { localStorage.setItem(AS_KEY, JSON.stringify({ name: ed.fileName, time: Date.now(), ksh: K.exportKsh(ed.chart).text })); } catch (e) { }
+}
+function clearAutosave() { try { localStorage.removeItem(AS_KEY); } catch (e) { } }
+function readAutosave() { try { return JSON.parse(localStorage.getItem(AS_KEY) || 'null'); } catch (e) { return null; } }
+function restoreAutosave() {
+	const a = readAutosave(); if (!a) return toast('No autosave found.', true);
+	if (!confirmDiscard()) return;
+	const r = K.importKsh(a.ksh);
+	ed.loadChart(r.chart, a.name); ed.dirty = true; updateTitle();
+	autosaveBanner = null; renderTab(true);
+	toast('Restored autosave from ' + new Date(a.time).toLocaleString());
+}
+setInterval(doAutosave, 15000);
+window.addEventListener('beforeunload', (e) => { if (ed.dirty) { doAutosave(); e.preventDefault(); e.returnValue = ''; } });
+
+// ---------------------------------------------------------------- help
+function showHelp() {
+	const rows = [
+		['1 – 5', 'Tools: Select, BT, FX, Laser L, Laser R'],
+		['Click / drag', 'Place a chip / drag up to make a hold'],
+		['Laser tools', 'Drag to draw. Start a drag on a laser\'s end point to continue it. A sideways drag (same time) makes a slam. Drag a point to move it, drag a laser\'s body to add a point.'],
+		['Right-click', 'Delete the thing under the mouse'],
+		['Graph columns', 'Click to add a camera keyframe (zoom/tilt/rotation…), drag to change value and time, double-click to type a value'],
+		['BPM column', 'Click to add BPM / time signature / stop / spin, double-click a marker to edit'],
+		['Measure gutter', 'Click or drag to move the cursor'],
+		['Space', 'Play / pause from the cursor'], ['Shift+Space', 'Stop and jump back'],
+		['↑ / ↓', 'Move cursor one grid step'], ['PgUp / PgDn', 'Move cursor one measure'], ['Home / End', 'Start / last note'],
+		['Ctrl+↑ / ↓ or [ / ]', 'Finer / coarser grid'], ['Mouse wheel', 'Scroll'], ['Ctrl+wheel, + / -', 'Zoom'],
+		['Alt (while dragging)', 'Turn off snapping'], ['Shift / Ctrl+click', 'Add to selection'],
+		['Ctrl+C / X / V', 'Copy / cut / paste at the cursor'], ['Ctrl+Shift+V', 'Paste mirrored'], ['Ctrl+M', 'Mirror selection'],
+		['Alt+↑ / ↓', 'Move selection one grid step'], ['Del', 'Delete selection'], ['Ctrl+Z / Ctrl+Y', 'Undo / redo'],
+		['Ctrl+S', 'Save .ksh'], ['Ctrl+O', 'Open .ksh and/or audio (or drag files onto the window)'],
+		['M / H / P', 'Metronome / hitsounds / preview'],
+	];
+	showModal('Controls & shortcuts', '<table>' + rows.map(([k, v]) => `<tr><td><kbd>${esc(k)}</kbd></td><td>${esc(v)}</td></tr>`).join('') + '</table>');
+}
+function showAbout() {
+	showModal('About KSH export', `
+<p>Charts are saved in K-Shoot MANIA's <b>.ksh</b> format, following the official spec and libkson (KSM's own parser). The exporter re-saves KSM's sample charts byte-for-byte identical to KSM's editor.</p>
+<h3>How things are stored</h3>
+<table>
+<tr><td>Time</td><td>240 ticks per beat. Each measure is written with the fewest lines that hit every note (up to 192 per measure for 1/192 snaps).</td></tr>
+<tr><td>BT</td><td><code>1</code> chip, <code>2</code> hold rows</td></tr>
+<tr><td>FX</td><td><code>2</code> chip, <code>1</code> hold rows, effect in <code>fx-l=</code>/<code>fx-r=</code></td></tr>
+<tr><td>Lasers</td><td>Positions 0–50 as <code>0-9 A-Z a-o</code>, <code>:</code> connects, <code>-</code> none. A slam is written as a 1/32 step.</td></tr>
+<tr><td>Spins</td><td>Appended to the slam's line: <code>@(</code> <code>@)</code> spin, <code>@&lt;</code> <code>@&gt;</code> half spin, <code>S&lt;</code> <code>S&gt;</code> swing, length in 1/192 measures</td></tr>
+<tr><td>Camera</td><td><code>zoom_top</code>, <code>zoom_bottom</code>, <code>zoom_side</code>, <code>center_split</code>, <code>tilt</code>; a jump is two lines with the same key</td></tr>
+<tr><td>KSM v2 only</td><td><code>scroll_speed</code>, <code>rotation_deg</code> and all <code>*_curve</code> lines. Use File → Export for KSM v1 to turn curves into steps.</td></tr>
+</table>`);
+}
+
+// ---------------------------------------------------------------- input wiring
+const cv = $('#timeline');
+cv.addEventListener('pointerdown', (e) => { cv.focus(); if (popoverClose) popoverClose(); cv.setPointerCapture(e.pointerId); ed.pointerDown(e); ed.requestDraw(); });
+cv.addEventListener('pointermove', (e) => ed.pointerMove(e));
+cv.addEventListener('pointerup', (e) => { ed.pointerUp(e); try { cv.releasePointerCapture(e.pointerId); } catch (x) { } });
+cv.addEventListener('pointerleave', () => { if (!ed.drag) { ed.mouse = null; ed.ghost = null; ed.hover = null; ed.requestDraw(); } });
+cv.addEventListener('contextmenu', (e) => e.preventDefault());
+cv.addEventListener('dblclick', (e) => e.preventDefault());
+let seekTimer = 0;
+cv.addEventListener('wheel', (e) => {
+	e.preventDefault();
+	const dy = e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY;
+	if (e.ctrlKey || e.metaKey) { zoomBy(dy < 0 ? 1.15 : 1 / 1.15, e.offsetY); return; }
+	const dir = ed.settings.invertWheel ? -1 : 1;
+	const dt = -dy * dir * (e.shiftKey ? 4 : 1) / tl.ppt;
+	if (ed.playing) {
+		ed.playTick = Math.max(0, ed.playTick + dt);
+		ed.audio.stop(); ed.playing = false;
+		clearTimeout(seekTimer); const target = ed.playTick;
+		ed.cursor = target; tl.bottomTick = target - (tl.h * 0.2) / tl.ppt;
+		seekTimer = setTimeout(() => { ed.cursor = target; ed.play(); }, 120);
+	} else tl.bottomTick += dt;
+	if (ed.drag) ed.pointerMove(e);
+	ed.requestDraw();
+}, { passive: false });
+
+window.addEventListener('keydown', (e) => {
+	const tag = document.activeElement && document.activeElement.tagName;
+	const typing = /INPUT|TEXTAREA|SELECT/.test(tag);
+	const ctrl = e.ctrlKey || e.metaKey, k = e.key;
+	if (ctrl && (k === 's' || k === 'S')) { e.preventDefault(); save(e.shiftKey); return; }
+	if (ctrl && (k === 'o' || k === 'O')) { e.preventDefault(); openDialog(); return; }
+	if (typing) { if (k === 'Escape') document.activeElement.blur(); return; }
+	if (!$('#modal').classList.contains('hidden')) { if (k === 'Escape') closeModal(); return; }
+	if (k === 'F1') { e.preventDefault(); showHelp(); return; }
+	if (ctrl) {
+		const lk = k.toLowerCase();
+		if (lk === 'z' && !e.shiftKey) { e.preventDefault(); ed.undo(); }
+		else if (lk === 'y' || (lk === 'z' && e.shiftKey)) { e.preventDefault(); ed.redo(); }
+		else if (lk === 'c') { e.preventDefault(); ed.copy(); }
+		else if (lk === 'x') { e.preventDefault(); ed.copy(true); }
+		else if (lk === 'v') { e.preventDefault(); ed.paste(e.shiftKey); }
+		else if (lk === 'a') { e.preventDefault(); ed.selectAll(); }
+		else if (lk === 'm') { e.preventDefault(); ed.mirrorSelection(); }
+		else if (lk === 'n') { e.preventDefault(); newChart(); }
+		else if (k === 'ArrowUp') { e.preventDefault(); changeDiv(1); }
+		else if (k === 'ArrowDown') { e.preventDefault(); changeDiv(-1); }
+		return;
+	}
+	const tool = TOOLS.find(t => t.key === k);
+	if (tool && !e.altKey) { setTool(tool.id); return; }
+	switch (k) {
+		case ' ': e.preventDefault(); e.shiftKey ? ed.stop() : ed.toggle(); break;
+		case 'Escape': if (ed.drag) ed.cancelDrag(); else if (popoverClose) popoverClose(); else ed.setSel([]); break;
+		case 'Delete': case 'Backspace': e.preventDefault(); ed.deleteSelection(); break;
+		case 'ArrowUp': e.preventDefault(); if (e.altKey) ed.nudgeSelection(1); else moveCursor(ed.timing.stepFrom(ed.playing ? ed.playTick : ed.cursor, ed.div, 1)); break;
+		case 'ArrowDown': e.preventDefault(); if (e.altKey) ed.nudgeSelection(-1); else moveCursor(ed.timing.stepFrom(ed.playing ? ed.playTick : ed.cursor, ed.div, -1)); break;
+		case 'PageUp': e.preventDefault(); { const ms = ed.timing.measureOf(ed.cursor); moveCursor(ms.start + ms.len); } break;
+		case 'PageDown': e.preventDefault(); { const ms = ed.timing.measureOf(Math.max(0, ed.cursor - 1)); moveCursor(ed.cursor === ms.start + ms.len ? ms.start : ms.start); } break;
+		case 'Home': moveCursor(0); break;
+		case 'End': moveCursor(ed.chartEndTick()); break;
+		case '[': changeDiv(-1); break;
+		case ']': changeDiv(1); break;
+		case '+': case '=': zoomBy(1.25); break;
+		case '-': case '_': zoomBy(0.8); break;
+		case 'm': case 'M': toggleMetro(); break;
+		case 'h': case 'H': toggleHits(); break;
+		case 'p': case 'P': togglePreview(); break;
+	}
+});
+function changeDiv(d) { const i = DIVS.indexOf(ed.div); ed.div = DIVS[K.clamp((i < 0 ? 7 : i) + d, 0, DIVS.length - 1)]; buildOptbar(); toast('Grid 1/' + ed.div); ed.requestDraw(); }
+
+// keep Space / arrow keys for the editor: don't leave focus on buttons and toolbar selects
+document.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && !b.closest('#popover') && !b.closest('#modal')) { b.blur(); cv.focus({ preventScroll: true }); } });
+document.addEventListener('change', (e) => { if (e.target.closest('#optbar, #transport') && e.target.type !== 'text') { e.target.blur(); cv.focus({ preventScroll: true }); } });
+
+// drag & drop
+const wrap = $('#app');
+let dragDepth = 0;
+wrap.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; $('#timelineWrap').classList.add('drop'); });
+wrap.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#timelineWrap').classList.remove('drop'); } });
+wrap.addEventListener('dragover', (e) => e.preventDefault());
+wrap.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; $('#timelineWrap').classList.remove('drop'); const f = [...e.dataTransfer.files]; if (f.length) openFiles(f); });
+$('#modal').addEventListener('mousedown', (e) => { if (e.target.id === 'modal' || e.target.hasAttribute('data-close')) closeModal(); });
+
+// ---------------------------------------------------------------- events from editor
+let tabTimer = 0;
+ed.on('change', () => { updateTitle(); clearTimeout(tabTimer); tabTimer = setTimeout(() => { if (!ed.drag) { buildTabs(); renderTab(); } }, 90); });
+ed.on('select', () => { if (ed.sel.size && currentTab !== 'props' && currentTab !== 'settings') { currentTab = 'props'; buildTabs(); } if (currentTab === 'props') renderTab(true); });
+ed.on('play', () => { lastTr = ''; updateTransport(); });
+ed.on('loaded', () => { updateTitle(); buildTabs(); renderTab(true); buildOptbar(); });
+
+// ---------------------------------------------------------------- main loop
+new ResizeObserver(() => { tl.resize(); ed.requestDraw(); }).observe($('#timelineWrap'));
+new ResizeObserver(() => { pv.resize(); ed.requestDraw(); }).observe($('#previewPane'));
+let previewFrames = 0;
+const perf = { frames: 0, worst: 0, sum: 0 };
+function frame() {
+	if (ed.playing) {
+		const s = ed.audio.songTimeNow();
+		if (s !== null) ed.playTick = ed.tickOfSong(s);
+		ed.scheduleHits();
+		if (ed.settings.follow && !ed.drag) tl.bottomTick = ed.playTick - (tl.h * 0.2) / tl.ppt;
+		const endT = Math.max(ed.chartEndTick() + 960, ed.audio.buffer ? ed.tickOfSong(ed.audio.duration) : 0);
+		if (ed.playTick > endT) ed.pause();
+		ed.needDraw = true;
+	}
+	if (ed.needDraw) {
+		const t0 = performance.now();
+		ed.needDraw = false;
+		tl.draw();
+		if (ed.settings.showPreview) { pv.draw(ed.playing ? ed.playTick : ed.cursor); previewFrames = 30; }
+		updateTransport();
+		const dt = performance.now() - t0; perf.frames++; perf.sum += dt; perf.worst = Math.max(perf.worst, dt);
+	} else if (previewFrames > 0 && ed.settings.showPreview) { previewFrames--; pv.draw(ed.cursor); }
+	requestAnimationFrame(frame);
+}
+setInterval(() => ed.scheduleHits(), 20);
+
+// ---------------------------------------------------------------- boot
+buildMenus(); buildToolbox(); buildOptbar(); buildTransport(); buildTabs();
+$('#previewPane').classList.toggle('hidden', !ed.settings.showPreview);
+(() => {
+	const a = readAutosave();
+	if (a && a.ksh && a.ksh.length > 300) {
+		autosaveBanner = h('div', { class: 'banner' }, 'Unsaved chart "' + a.name + '" from ' + new Date(a.time).toLocaleString() + ' was found. ',
+			h('div', { class: 'btns' }, h('button', { class: 'on', onclick: restoreAutosave }, 'Restore'), h('button', { onclick: () => { autosaveBanner = null; clearAutosave(); renderTab(true); } }, 'Dismiss')));
+	}
+})();
+renderTab(true); updateTitle();
+requestAnimationFrame(() => { tl.resize(); pv.resize(); tl.bottomTick = -tl.h * 0.15 / tl.ppt; ed.requestDraw(); frame(); });
+window.KSMEditor = { ed, tl, pv, perf, K }; // for debugging / tests
