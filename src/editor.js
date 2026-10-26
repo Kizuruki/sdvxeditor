@@ -15,7 +15,8 @@ const LASER_SNAPS = [{ v: 1, label: '51 (fine)' }, { v: 5, label: '11 (1/10)' },
 const CAM_STEP = { zoom_top: 5, zoom_bottom: 5, zoom_side: 5, center_split: 5, rotation_deg: 5, scroll_speed: 0.05, tilt: 0.05 };
 
 const DEFAULT_SETTINGS = {
-	laneW: 42, showWave: true, showPreview: true, previewBeats: 5, rate: 1, follow: true,
+	laneW: 42, showWave: true, showPreview: true, rate: 1, follow: true,
+	speedMode: 'mod', modSpeed: 800, hiSpeed: 5, drawOffsetMs: 0, previewW: 340,
 	volMusic: 0.8, volHit: 0.55, volMetro: 0, hitsounds: true, latencyMs: 0, autosave: true, placeSound: false,
 	cols: { zoom_top: true, zoom_bottom: true, zoom_side: true, tilt: true, rotation_deg: true, center_split: false, scroll_speed: false },
 };

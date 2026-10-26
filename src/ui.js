@@ -225,6 +225,31 @@ function fxEditor(value, onChange, opts = {}) {
 
 // ---------------------------------------------------------------- transport
 const TR = {};
+// ---- preview pane: speed control + resize
+function syncSpeedUI() {
+	const S = ed.settings, el = $('#pvSpeed'); if (!el) return;
+	const hs = S.speedMode === 'hs';
+	// mod mode is shown like SDVX EG's LANE-SPEED (BPM x hi-speed / 100)
+	const get = () => hs ? S.hiSpeed : S.modSpeed / 100;
+	const step = hs ? 0.25 : 0.25, lo = hs ? 0.5 : 1, hi = 20;
+	const set = (v) => { v = Math.round(K.clamp(v, lo, hi) * 100) / 100; if (hs) S.hiSpeed = v; else S.modSpeed = Math.round(v * 100); ed.saveSettings(); inp.value = get().toFixed(2); ed.requestDraw(); if (currentTab === 'settings') renderTab(true); };
+	const inp = h('input', { type: 'text', inputmode: 'decimal', value: get().toFixed(2), title: hs ? 'Hi-speed multiplier' : 'Lane speed = BPM × hi-speed ÷ 100, reached at the chart\'s main BPM (like SDVX EG)', onchange: (e) => set(parseFloat(e.target.value) || get()) });
+	el.replaceChildren(
+		h('span', { class: 'lbl', title: 'Click to switch between lane speed and a fixed hi-speed multiplier', onclick: () => { S.speedMode = hs ? 'mod' : 'hs'; ed.saveSettings(); syncSpeedUI(); ed.requestDraw(); if (currentTab === 'settings') renderTab(true); } }, hs ? 'HS' : 'SPEED'),
+		h('button', { title: 'Slower', onclick: () => set(get() - step) }, '−'), inp, h('button', { title: 'Faster', onclick: () => set(get() + step) }, '+'));
+}
+(() => {
+	const pane = $('#previewPane'), grip = $('#pvResize');
+	pane.style.width = (ed.settings.previewW || 320) + 'px';
+	grip.addEventListener('pointerdown', (e) => {
+		e.preventDefault(); grip.setPointerCapture(e.pointerId); grip.classList.add('on');
+		const x0 = e.clientX, w0 = pane.getBoundingClientRect().width;
+		const move = (ev) => { const w = Math.round(K.clamp(w0 + ev.clientX - x0, 180, Math.min(900, window.innerWidth * 0.6))); pane.style.width = w + 'px'; ed.settings.previewW = w; tl.resize(); pv.resize(); ed.requestDraw(); };
+		const up = () => { grip.classList.remove('on'); grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); ed.saveSettings(); };
+		grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up);
+	});
+})();
+
 function buildTransport() {
 	const t = $('#transport'); t.innerHTML = '';
 	TR.start = h('button', { class: 'ibtn', title: 'Go to start (Home)', html: ICONS.start, onclick: () => moveCursor(0) });
@@ -530,7 +555,7 @@ function renderCheck(body) {
 
 function renderSettings(body) {
 	const S = ed.settings;
-	const save = () => { ed.saveSettings(); ed.applyAudioSettings(); tl.layout(); ed.requestDraw(); };
+	const save = () => { ed.saveSettings(); ed.applyAudioSettings(); tl.layout(); ed.requestDraw(); syncSpeedUI(); };
 	const slider = (k, min, max, step, fmt) => { const out = h('span', { class: 'muted', style: 'min-width:42px' }, fmt(S[k])); return [h('input', { type: 'range', min, max, step, value: S[k], style: 'flex:1', oninput: (e) => { S[k] = +e.target.value; out.textContent = fmt(S[k]); save(); } }), out]; };
 	const chk = (k, after) => h('input', { type: 'checkbox', checked: S[k], onchange: (e) => { S[k] = e.target.checked; save(); if (after) after(); } });
 	const pct = v => Math.round(v * 100) + '%';
@@ -544,7 +569,11 @@ function renderSettings(body) {
 		h('div', { class: 'note' }, 'Playback timing comes from the audio clock and already corrects for your output device. Only adjust latency if the cursor still looks early (+) or late (−) against what you hear, e.g. with Bluetooth headphones.')));
 	body.append(sec('View',
 		row('Lane width', ...slider('laneW', 26, 80, 1, v => v + ' px')),
-		row('Preview note speed', ...slider('previewBeats', 2, 12, 0.5, v => v + ' beats')),
+		row('Preview speed', h('select', { onchange: (e) => { S.speedMode = e.target.value; save(); } }, h('option', { value: 'mod', selected: S.speedMode !== 'hs' }, 'Lane speed (like SDVX EG)'), h('option', { value: 'hs', selected: S.speedMode === 'hs' }, 'Hi-speed multiplier'))),
+		row('Lane speed', ...slider('modSpeed', 100, 2000, 5, v => (v / 100).toFixed(2))),
+		row('Hi-speed', ...slider('hiSpeed', 0.5, 20, 0.05, v => (+v).toFixed(2))),
+		row('Draw offset', ...slider('drawOffsetMs', -200, 200, 1, v => (v > 0 ? '+' : '') + v + ' ms')),
+		h('div', { class: 'note' }, 'Lane speed = BPM × hi-speed ÷ 100 at the chart\'s main BPM, so 8.00 looks the same in every chart, and faster BPM sections still scroll faster (as in game). The preview uses USC\'s camera, so the track, tilt, spins and zooms match USC. Draw offset is like the game\'s DRAW setting: + makes notes meet a point above the judgment line, − below it. It only moves the preview\'s notes; sound and the timeline are unaffected.'),
 		row('Show waveform', chk('showWave')),
 		row('Show preview', chk('showPreview', () => { $('#previewPane').classList.toggle('hidden', !S.showPreview); requestAnimationFrame(() => { tl.resize(); pv.resize(); }); })),
 		row('Follow playback', chk('follow')),
@@ -826,7 +855,7 @@ function frame() {
 		const t0 = performance.now();
 		ed.needDraw = false;
 		tl.draw();
-		if (ed.settings.showPreview) { pv.draw(ed.playing ? ed.playTick : ed.cursor); previewFrames = 30; }
+		if (ed.settings.showPreview) { pv.draw(ed.playing ? ed.playTick : ed.cursor, ed.playing); previewFrames = 30; }
 		updateTransport();
 		const dt = performance.now() - t0; perf.frames++; perf.sum += dt; perf.worst = Math.max(perf.worst, dt);
 	} else if (previewFrames > 0 && ed.settings.showPreview) { previewFrames--; pv.draw(ed.cursor); }
@@ -835,7 +864,7 @@ function frame() {
 setInterval(() => ed.scheduleHits(), 20);
 
 // ---------------------------------------------------------------- boot
-buildMenus(); buildToolbox(); buildOptbar(); buildTransport(); buildTabs();
+buildMenus(); buildToolbox(); buildOptbar(); buildTransport(); buildTabs(); syncSpeedUI();
 $('#previewPane').classList.toggle('hidden', !ed.settings.showPreview);
 (() => {
 	const a = readAutosave();
