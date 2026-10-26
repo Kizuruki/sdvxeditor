@@ -1,7 +1,7 @@
 /* ============================================================================
- * SOUND VOLTEX export: .vox chart (format 10), .2dx audio (MS-ADPCM WAV in a
- * 2DX container), music_db entry (Shift-JIS XML), jackets, all in one .zip
- * laid out for data_mods. Mappings follow the user's working pair
+ * SOUND VOLTEX export and import: .vox chart (format 12 or 10), .2dx audio
+ * (MS-ADPCM WAV in a 2DX container), music_db entry (Shift-JIS XML), jackets,
+ * all in one .zip laid out like the game's data/music folder. Mappings follow the user's working pair
  * (mxm.ksh -> 2811_custom_5m.vox) and the community VOX format notes.
  * ========================================================================== */
 const SDVX = (() => {
@@ -15,37 +15,21 @@ const SDVX = (() => {
 	const f2 = (v) => { const s = (Math.round(v * 100) / 100).toFixed(2); return s === '-0.00' ? '0.00' : s; };
 
 	// ---------------------------------------------------------------- VOX
-	// laser filter -> #TAB EFFECT INFO index (0 = built-in peak filter)
-	const FILTER_CODE = { peak: 0, lpf1: 1, hpf1: 3, bitc: 5 };
-	const TAB_EFFECTS = [
-		'1,\t90.00,\t400.00,\t18000.00,\t0.70', '1,\t90.00,\t600.00,\t15000.00,\t5.00',
-		'2,\t90.00,\t40.00,\t5000.00,\t0.70', '2,\t90.00,\t40.00,\t2000.00,\t3.00', '3,\t100.00,\t30'];
 	const SE_CODE = { clap: 3, clap_punchy: 3, clap_impact: 2, snare: 5, snare_lo: 4 };
-	// FX hold effect -> #FXBUTTON EFFECT INFO line
+	// FX hold effect -> #FXBUTTON EFFECT INFO line (the mapping lives in fx.js, so playback in "SOUND VOLTEX" mode matches)
 	function fxLine(e, warn) {
-		const half = (n) => Math.max(1, Math.round(n / 2));
-		switch (e.type) {
-			case 'Retrigger': return `1,\t${half(e.p0)},\t95.00,\t2.00,\t1.00,\t0.85,\t0.15`;
-			case 'Gate': return `2,\t100.00,\t${half(e.p0)},\t1.00`;
-			case 'Phaser': warn('Phaser has no SDVX equivalent; exported as Flanger.');
-			// falls through
-			case 'Flanger': return '3,\t80.00,\t2.00,\t0.50,\t90,\t2.00';
-			case 'TapeStop': return `4,\t100.00,\t8.00,\t${f2(K.clamp(22 / Math.max(1, e.p0), 0.1, 2))}`;
-			case 'SideChain': return '5,\t90.00,\t1.00,\t45,\t50,\t60';
-			case 'Wobble': return `6,\t0,\t1,\t100.00,\t500.00,\t20000.00,\t${f2(Math.max(1, e.p0) / 3)},\t1.41`;
-			case 'BitCrusher': return `7,\t100.00,\t${K.clamp(Math.round(e.p0), 1, 30)}`;
-			case 'Echo': return `8,\t${half(e.p0)},\t100.00,\t2.00,\t${f2(K.clamp(e.p1 / 100, 0.1, 1))},\t0.85,\t0.15,\t0.00`;
-			case 'PitchShift': return `9,\t100.00,\t${f2(e.p0)}`;
-		}
-		return null;
+		if (e.type === 'Phaser' && !e.sv) warn('Phaser has no SDVX equivalent; exported as Flanger.');
+		const p = KSMFX.sdvxParams(e);
+		return p ? KSMFX.svLine(p) : null;
 	}
 
 	function buildVox(chartIn, opts = {}) {
 		const warnings = [];
 		const warn = (msg, t) => { if (!warnings.some(w => w.msg === msg)) warnings.push({ t: t || 0, msg }); };
-		const c = K.toUsc(chartIn, warnings); // no curves, rotation folded into tilt
+		const c = K.toUsc(chartIn, warnings, 'SOUND VOLTEX'); // no curves, rotation folded into tilt
 		const tm = new K.Timing(c);
 		const edge = opts.laserEdge || 124;
+		const V12 = (opts.format || 12) >= 12; // 12 = current games (decimal laser positions, explicit spin lengths); 10 = older tools
 		const pos = (t) => {
 			t = Math.max(0, Math.round(t / 5) * 5);
 			const ms = tm.measureOf(t), cpb = 192 / ms.d, cells = Math.round((t - ms.start) / 5);
@@ -57,7 +41,7 @@ const SDVX = (() => {
 		const sec = (name, rows) => { L.push('#' + name, ...rows, '#END', ''); };
 		const sep = () => L.push('//====================================', '');
 		L.push('//====================================', '// SOUND VOLTEX OUTPUT TEXT FILE', '//====================================', '');
-		sec('FORMAT VERSION', ['10']);
+		sec('FORMAT VERSION', [V12 ? '12' : '10']);
 		sec('BEAT INFO', c.sig.map(s => pos(tm.measureStart(s.m)) + '\t' + s.n + '\t' + s.d));
 		// BPM changes; stops become pauses ("4-") that end with the BPM restated
 		const bpmRows = c.bpm.map(b => ({ t: b.t, s: pos(b.t) + '\t' + b.v.toFixed(4) + '\t4' }));
@@ -80,7 +64,7 @@ const SDVX = (() => {
 		for (const l of c.laser) for (const s of l) end = Math.max(end, K.sectionEndTick(s));
 		const endM = tm.measureOf(end).m + 2;
 		sec('END POSITION', [pos(tm.measureStart(endM))]);
-		sec('TAB EFFECT INFO', TAB_EFFECTS);
+		sec('TAB EFFECT INFO', KSMFX.TAB_STD.map(r => KSMFX.svLine(r, true)));
 		// FX hold effects: one pair per hold, in time order (L before R)
 		const defines = KSMFX.parseDefines(c.defs);
 		const holds = [];
@@ -95,33 +79,59 @@ const SDVX = (() => {
 			holdIdx.set(hd.n, 2 + pairRows.length / 3);
 			pairRows.push(line, '0,\t0,\t0,\t0,\t0,\t0,\t0', '');
 		}
+		// lasers running an FX effect (a #define_filter with an FX type) -> "auto tab" spans over the lasers, one pair per effect
+		const laserSpans = [];
+		for (const lane of c.laser) for (const s of lane) laserSpans.push([s.t, K.sectionEndTick(s)]);
+		laserSpans.sort((a, b) => a[0] - b[0]);
+		const merged = [];
+		for (const iv of laserSpans) { const last = merged[merged.length - 1]; if (last && iv[0] <= last[1]) last[1] = Math.max(last[1], iv[1]); else merged.push(iv.slice()); }
+		const fsteps = [{ t: 0, v: KSMFX.filterKind(c.meta.filtertype, defines) }, ...c.filterType.map(p => ({ t: p.t, v: KSMFX.filterKind(p.v, defines) }))];
+		const autoRows = [], autoPair = new Map();
+		fsteps.forEach((f, i) => {
+			const base = KSMFX.kindBase(f.v); if (!base.startsWith('fx:')) return;
+			const t0 = f.t, t1 = i + 1 < fsteps.length ? fsteps[i + 1].t : Infinity;
+			const [type, a, b] = base.slice(3).split(';');
+			const p = KSMFX.sdvxParams({ type, p0: +a, p1: +b, sv: KSMFX.kindSv(f.v) });
+			if (!p) { warn('Laser effect "' + type + '" has no SDVX equivalent and was left out.', t0); return; }
+			const line = KSMFX.svLine(p);
+			for (const [s0, s1] of merged) {
+				const a0 = Math.max(s0, t0), a1 = Math.min(s1, t1); if (a1 <= a0) continue;
+				if (!autoPair.has(line)) { autoPair.set(line, 2 + pairRows.length / 3); pairRows.push(line, '0,\t0,\t0,\t0,\t0,\t0,\t0', ''); }
+				autoRows.push(`${pos(a0)}\t${cells(a1 - a0)}\t${autoPair.get(line)}`);
+			}
+		});
 		L.push('#FXBUTTON EFFECT INFO', ...pairRows, '#END', '');
 		const assign = []; for (let i = 0; i < 12; i++) assign.push(i + ',\t0,\t0.00,\t0.00', i + ',\t0,\t0.00,\t0.00');
 		sec('TAB PARAM ASSIGN INFO', assign);
 		sec('REVERB EFFECT PARAM', []);
 		L.push('//====================================', '// TRACK INFO', '//====================================', '');
 		// lasers
-		const filterAt = (t) => { const p = K.lastAtOrBefore(c.filterType, t); const v = KSMFX.filterKind(p ? p.v : c.meta.filtertype, defines); return FILTER_CODE[v] ?? 0; };
+		const filterAt = (t) => { const p = K.lastAtOrBefore(c.filterType, t); return KSMFX.tabCode(KSMFX.filterKind(p ? p.v : c.meta.filtertype, defines)); };
 		const spinAt = new Map(c.spins.map(s => [s.t, s]));
 		const usedSpins = new Set();
+		// SDVX spin durations include the overshoot, so they are twice the KSH length
 		const rollCode = (s) => {
-			if (s.kind !== 'spin') return 5; // half spin / swing -> 3-beat swing
-			const beats = 2 * s.l / 240; // SDVX durations include the overshoot: twice the KSH length
-			return [[2, 2], [3, 3], [1, 7]].reduce((best, [code, b]) => Math.abs(b - beats) < Math.abs(best[1] - beats) ? [code, b] : best, [2, 2])[0];
+			const beats = 2 * s.l / 240;
+			if (V12) return s.kind === 'spin' ? [6, Math.max(1, Math.round(beats * 10))] : [7, Math.max(1, Math.round(beats * 10))]; // length in 1/10 beats
+			if (s.kind !== 'spin') return [5, 0]; // half spin / swing -> 3-beat swing
+			return [[[2, 2], [3, 3], [1, 7]].reduce((best, [code, b]) => Math.abs(b - beats) < Math.abs(best[1] - beats) ? [code, b] : best, [2, 2])[0], 0];
 		};
 		const laserTrack = (lane) => {
 			const rows = [];
 			for (const s of c.laser[lane]) {
 				const range = s.wide ? 2 : 1, last = s.pts.length - 1;
 				const val = (v) => { v = K.clamp(v, 0, 50); return v <= 0 ? 0 : Math.ceil(v * (edge + 1) / 50 - 1e-9) - 1; }; // same as the reference conversion: 1->2, 2->4, 25->62, 47->117, 50->124
+				const row = (t, v, node, roll, fc) => V12
+					? `${pos(t)}\t${(K.clamp(v, 0, 50) / 50).toFixed(6)}\t${node}\t${roll[0]}\t${fc}\t${range}\t0\t0\t${roll[1]}`
+					: `${pos(t)}\t${val(v)}\t${node}\t${roll[0]}\t${fc}\t${range}\t0`;
 				s.pts.forEach((p, i) => {
 					const t = s.t + p.ry, fc = filterAt(t);
 					if (p.v !== p.vf) {
-						const sp = spinAt.get(t); let roll = 0;
+						const sp = spinAt.get(t); let roll = [0, 0];
 						if (sp) { roll = rollCode(sp); usedSpins.add(sp); }
-						rows.push(`${pos(t)}\t${val(p.v)}\t${i === 0 ? 1 : 0}\t${roll}\t${fc}\t${range}\t0`);
-						rows.push(`${pos(t)}\t${val(p.vf)}\t${i === last ? 2 : 0}\t0\t${fc}\t${range}\t0`);
-					} else rows.push(`${pos(t)}\t${val(p.v)}\t${i === 0 ? 1 : i === last ? 2 : 0}\t0\t${fc}\t${range}\t0`);
+						rows.push(row(t, p.v, i === 0 ? 1 : 0, roll, fc));
+						rows.push(row(t, p.vf, i === last ? 2 : 0, [0, 0], fc));
+					} else rows.push(row(t, p.v, i === 0 ? 1 : i === last ? 2 : 0, [0, 0], fc));
 				});
 			}
 			return rows;
@@ -132,7 +142,7 @@ const SDVX = (() => {
 		tracks.forEach((rows, i) => { L.push('#TRACK' + (i + 1), ...rows, '#END', ''); sep(); });
 		for (const sp of c.spins) if (!usedSpins.has(sp)) warn('A spin that is not on a slam was left out (SDVX spins start on slams).', sp.t);
 		if (c.fx.some(l => l.some(n => n.l === 0 && n.se && !SE_CODE[n.se.split(';')[0]]))) warn('Custom FX chip sounds (sample files) have no SDVX equivalent and were left out.');
-		L.push('#TRACK AUTO TAB', '#END', '');
+		L.push('#TRACK AUTO TAB', ...autoRows, '#END', '');
 		sep();
 		// SPCONTROLER: camera graphs
 		const sp = ['001,01,00\tRealize\t3\t0\t36.12\t60.12\t110.12\t0.00', '001,01,00\tRealize\t4\t0\t0.62\t0.72\t1.03\t0.00',
@@ -140,27 +150,28 @@ const SDVX = (() => {
 		const graph = (name, pts, conv) => {
 			const num = pts.filter(p => typeof p.v === 'number');
 			if (!num.length || num.every(p => p.v === 0 && (p.vf === undefined || p.vf === 0))) return;
-			const first = conv(num[0].v);
-			sp.push(`001,01,00\t${name}\t2\t0\t${f2(first)}\t${f2(first)}\t0.00\t0.00`);
+			// like the game's own files: one row per segment, from the start of the chart to its end position
+			const first = conv(num[0].v), endT = tm.measureStart(endM);
 			if (num[0].t > 0) sp.push(`001,01,00\t${name}\t2\t${cells(num[0].t)}\t${f2(first)}\t${f2(first)}\t0.00\t0.00`);
 			num.forEach((p, i) => {
 				const q = num[i + 1], a = conv(p.v), b = conv(typeof p.vf === 'number' ? p.vf : p.v);
 				if (a !== b) sp.push(`${pos(p.t)}\t${name}\t2\t0\t${f2(a)}\t${f2(b)}\t0.00\t0.00`);
-				if (q) sp.push(`${pos(p.t)}\t${name}\t2\t${cells(q.t - p.t)}\t${f2(b)}\t${f2(conv(q.v))}\t0.00\t0.00`);
+				const until = q ? q.t : endT;
+				if (until > p.t) sp.push(`${pos(p.t)}\t${name}\t2\t${cells(until - p.t)}\t${f2(b)}\t${f2(q ? conv(q.v) : b)}\t0.00\t0.00`);
 			});
 		};
-		graph('CAM_RotX', c.cam.zoom_top, v => Math.tanh(v / 100));
-		graph('CAM_Radi', c.cam.zoom_bottom, v => -Math.tanh(v / 100));
-		graph('Morphing2', c.cam.center_split, v => v / 100 * 0.75);
-		// manual tilt (vox +1 = ksh -1); tilt=zero spans hold the lane flat
+		graph('CAM_RotX', c.cam.zoom_top, CAM.rotX);
+		graph('CAM_Radi', c.cam.zoom_bottom, CAM.radi);
+		graph('Morphing2', c.cam.center_split, CAM.split);
+		// manual tilt (vox +1 = ksh -1.5); tilt=zero spans hold the lane flat
 		const tiltSpans = [];
 		for (let i = 0; i < c.tilt.length; i++) {
 			const p = c.tilt[i], q = c.tilt[i + 1];
 			const after = p.vf !== undefined ? p.vf : p.v;
 			if (typeof p.v === 'number') {
-				const a = -p.v, b = typeof after === 'number' ? -after : -p.v;
+				const a = CAM.tiltOut(p.v), b = typeof after === 'number' ? CAM.tiltOut(after) : CAM.tiltOut(p.v);
 				if (a !== b) tiltSpans.push(`${pos(p.t)}\tTilt\t2\t0\t${f2(a)}\t${f2(b)}\t0.00\t0.00`);
-				if (q && typeof after === 'number') tiltSpans.push(`${pos(p.t)}\tTilt\t2\t${cells(q.t - p.t)}\t${f2(b)}\t${f2(typeof q.v === 'number' ? -q.v : b)}\t0.00\t0.00`);
+				if (q && typeof after === 'number') tiltSpans.push(`${pos(p.t)}\tTilt\t2\t${cells(q.t - p.t)}\t${f2(b)}\t${f2(typeof q.v === 'number' ? CAM.tiltOut(q.v) : b)}\t0.00\t0.00`);
 			} else if (after === 'zero') {
 				const until = q ? q.t : tm.measureStart(endM);
 				tiltSpans.push(`${pos(p.t)}\tTilt\t2\t${cells(until - p.t)}\t0.00\t0.00\t0.00\t0.00`);
@@ -173,7 +184,246 @@ const SDVX = (() => {
 		if (chartIn.pfilterGain.length) warn('pfiltergain changes are not exported (SDVX laser effects have fixed strength).');
 		L.push('#SPCONTROLER', ...sp, '#END', '');
 		sep();
-		return { text: L.join('\n'), warnings };
+		return { text: L.join(V12 ? '\r\n' : '\n'), warnings };
+	}
+
+	// ---------------------------------------------------------------- VOX import
+	// Camera / tilt scales shared by import and export. They come from hand-made USC conversions of official
+	// charts (e.g. 777 MXM): CAM_RotX 0.5 ~ zoom_top 80 / -0.5 ~ -60, CAM_Radi 1.0 ~ zoom_bottom -130, Tilt 1.0 ~ tilt -1.5.
+	const CAM = {
+		rotX: (zt) => K.clamp(zt >= 0 ? zt / 140 : zt / 120, -1, 1), zoomTop: (v) => v >= 0 ? v * 140 : v * 120,
+		radi: (zb) => K.clamp(zb <= 0 ? -zb / 125 : -zb / 75, -1, 1), zoomBottom: (v) => v >= 0 ? -v * 125 : -v * 75,
+		tiltOut: (t) => -t / 1.5, tiltIn: (v) => -v * 1.5,
+		split: (cs) => cs / 100 * 0.75, splitIn: (v) => v / 0.75 * 100,
+	};
+	// KSH effect string ('Retrigger;8', 'Echo;4;60', ...) -> parameters of an equivalent #define_fx / #define_filter
+	function kshDefParams(ksh) {
+		const [type, a, b] = ksh.split(';');
+		let def = 'type=' + type;
+		if (/Retrigger|Gate|Wobble|Echo/.test(type) && a) def += ';waveLength=1/' + a;
+		if (type === 'Echo' && b) def += ';feedbackLevel=' + b + '%';
+		if (type === 'BitCrusher' && a) def += ';amount=' + a + 'samples';
+		if (type === 'PitchShift' && a) def += ';pitch=' + a;
+		if (type === 'TapeStop' && a) def += ';speed=' + a + '%';
+		return def;
+	}
+	// FX pair line -> KSH effect string (inverse of fxLine)
+	function fxFromLine(f, warn) {
+		const n = (i) => parseFloat(f[i]);
+		switch (+f[0]) {
+			case 1: { const N = Math.max(1, Math.round(4 * n(1) / (n(3) || 2))); return n(4) < 0.95 ? 'Echo;' + N + ';' + Math.round(n(4) * 100) : 'Retrigger;' + N; }
+			case 8: { const N = Math.max(1, Math.round(4 * n(1) / (n(3) || 2))); return 'Echo;' + N + ';' + Math.round(K.clamp(n(4), 0, 1) * 100); }
+			case 2: return 'Gate;' + Math.max(1, Math.round(2 * n(2) / (n(3) || 1)));
+			case 3: return 'Flanger';
+			case 4: return 'TapeStop;' + K.clamp(Math.round(22 / (n(3) || 0.44)), 1, 100);
+			case 10: warn('"Tape Stop Ex" FX were imported as plain TapeStop.'); return 'TapeStop;50';
+			case 5: return 'SideChain';
+			case 6: return 'Wobble;' + Math.max(1, Math.round(n(6) * 3));
+			case 7: return 'BitCrusher;' + Math.round(n(2));
+			case 9: return 'PitchShift;' + Math.round(n(2));
+			case 13: return n(2) ? 'PitchShift;' + Math.round(n(2)) : null;
+			case 11: case 12: warn('Low/high-pass FX holds have no KSH equivalent and were left without an effect.'); return null;
+		}
+		return null;
+	}
+	function importVox(text, fileName) {
+		const warnings = [];
+		const warn = (msg, t) => { if (!warnings.some(w => w.msg === msg)) warnings.push({ t: t || 0, msg }); };
+		const S = {}; let sec = null;
+		for (let line of text.replace(/^﻿/, '').split(/\r?\n/)) {
+			const ci = line.indexOf('//'); if (ci >= 0) line = line.slice(0, ci);
+			if (!line.trim()) { if (sec && S[sec]) S[sec].push(null); continue; } // blank lines separate FX pairs
+			if (line.startsWith('#')) { const nm = line.trim().slice(1); if (nm === 'END') sec = null; else { sec = nm; S[sec] = S[sec] || []; } continue; }
+			if (sec) S[sec].push(line.split('\t').map(x => x.trim().replace(/,$/, '')));
+		}
+		const rows = (name) => (S[name] || []).filter(Boolean);
+		const ver = parseInt((rows('FORMAT VERSION')[0] || ['10'])[0], 10) || 10;
+		const res = parseInt((rows('BEAT RESOLUTION')[0] || ['48'])[0], 10) || 48; // cells per quarter note
+		const c = K.newChart(); const id = () => K.nid();
+		// time signatures first: positions depend on them
+		c.sig = [];
+		for (const r of rows('BEAT INFO')) { const m = parseInt(r[0], 10) - 1; if (!c.sig.some(x => x.m === m)) c.sig.push({ id: id(), m, n: +r[1], d: +r[2] }); }
+		if (!c.sig.length || c.sig[0].m !== 0) c.sig.unshift({ id: id(), m: 0, n: 4, d: 4 });
+		K.sortByT(c.sig.map(x => (x.t = x.m, x))); c.sig.sort((a, b) => a.m - b.m); c.sig.forEach(x => delete x.t);
+		let tm = new K.Timing(c);
+		const tick = (p) => {
+			const [m, b, cc] = String(p).split(',').map(Number);
+			const ms = tm.measureOf(tm.measureStart(m - 1));
+			const perCell = 240 / res; // ticks per cell
+			return Math.round(ms.start + (b - 1) * 960 / ms.d + cc * perCell);
+		};
+		// BPM and pauses ("4-" starts a stop that lasts until the next BPM row)
+		const bpmRows = rows('BPM INFO').map(r => ({ t: tick(r[0]), v: parseFloat(r[1]), stop: String(r[2]).includes('-') })).sort((a, b) => a.t - b.t);
+		c.bpm = []; c.stops = [];
+		bpmRows.forEach((r, i) => {
+			const last = c.bpm[c.bpm.length - 1];
+			if (!last || Math.abs(last.v - r.v) > 1e-6) c.bpm.push({ id: id(), t: c.bpm.length ? r.t : 0, v: r.v });
+			if (r.stop) { const nx = bpmRows[i + 1]; if (nx && nx.t > r.t) c.stops.push({ id: id(), t: r.t, l: nx.t - r.t }); }
+		});
+		if (!c.bpm.length) c.bpm.push({ id: id(), t: 0, v: 120 });
+		tm = new K.Timing(c);
+		c.meta.t = K.autoDispBpm(c);
+		// FX effect pairs (index 2 = first pair); a pair's first non-empty effect is used
+		const pairs = []; let cur = [];
+		for (const r of (S['FXBUTTON EFFECT INFO'] || [])) { if (r === null) { if (cur.length) pairs.push(cur); cur = []; } else cur.push(r); }
+		if (cur.length) pairs.push(cur);
+		// Effects become #define_fx / #define_filter lines carrying the exact SDVX row ("sdvx=..."), so playback in
+		// SOUND VOLTEX mode and a re-export use the original parameters; USC / KSM use the KSH approximation.
+		const defLines = [], defNames = new Map(), usedNames = new Set();
+		const define = (kind, label, params, f) => {
+			const key = kind + '|' + f.join(',');
+			if (defNames.has(key)) return defNames.get(key);
+			const stem = label.replace(/[^A-Za-z0-9]+/g, '_').replace(/_$/, '');
+			let name = stem, k = 2; while (usedNames.has(name)) name = stem + '_' + k++;
+			usedNames.add(name); defNames.set(key, name);
+			defLines.push('#define_' + kind + ' ' + name + ' ' + params + ';sdvx=' + f.join(','));
+			return name;
+		};
+		const pairFx = pairs.map(p => { for (const f of p) if (+f[0] !== 0) { const ksh = fxFromLine(f, warn); return ksh ? { ksh, f } : null; } return null; });
+		const tabFx = rows('TAB EFFECT INFO').map(f => {
+			const base = ({ 1: 'lpf1', 2: 'hpf1', 3: 'bitc' })[+f[0]]; if (!base) return 'peak';
+			const v = f.map(Number), std = KSMFX.TAB_STD[{ lpf1: 0, hpf1: 2, bitc: 4 }[base]];
+			if (base === 'bitc' || (std.length === v.length && std.every((x, j) => Math.abs(x - v[j]) < 1e-6))) return base;
+			return define('filter', 'SV_' + (base === 'lpf1' ? 'LPF' : 'HPF') + '_' + Math.round(v[2]) + '_' + Math.round(v[3]) + '_Q' + v[4], 'type=' + (base === 'lpf1' ? 'LowPassFilter' : 'HighPassFilter'), f);
+		});
+		// BT / FX
+		const SE_IN = { 2: 'clap_impact', 3: 'clap', 4: 'snare_lo', 5: 'snare' };
+		[3, 4, 5, 6].forEach((tr, lane) => { c.bt[lane] = rows('TRACK' + tr).map(r => ({ id: id(), t: tick(r[0]), l: Math.round((+r[1] || 0) * 240 / res) })).sort((a, b) => a.t - b.t); });
+		[[2, 0], [7, 1]].forEach(([tr, lane]) => {
+			c.fx[lane] = rows('TRACK' + tr).map(r => {
+				const n = { id: id(), t: tick(r[0]), l: Math.round((+r[1] || 0) * 240 / res) };
+				const code = +r[2] || 0;
+				if (n.l > 0 && code >= 2) { const e = pairFx[code - 2]; if (e) n.fx = define('fx', 'SV_' + e.ksh, kshDefParams(e.ksh), e.f); }
+				if (n.l === 0 && SE_IN[code]) n.se = SE_IN[code];
+				else if (n.l === 0 && code && code !== 255) warn('Some FX chip sounds have no KSM equivalent and were left out.', n.t);
+				return n;
+			}).sort((a, b) => a.t - b.t);
+		});
+		// lasers
+		const laserRows = [rows('TRACK1'), rows('TRACK8')];
+		let maxRaw = 0; if (ver < 12) for (const lr of laserRows) for (const r of lr) maxRaw = Math.max(maxRaw, +r[1]);
+		const scale = ver >= 12 ? 50 : 50 / (maxRaw <= 124 && maxRaw > 100 ? 124 : 127);
+		const filterEvents = []; // {t, code}
+		const DEF_ROLL = { 1: 7, 2: 2, 3: 3, 4: 12, 5: 3, 6: 7, 7: 3 };
+		laserRows.forEach((lr, lane) => {
+			let sec = null; const out = [];
+			const finish = () => { if (sec && sec.pts.length) out.push(simplifyLaser(sec)); sec = null; };
+			for (let i = 0; i < lr.length; i++) {
+				const r = lr[i], t = tick(r[0]), v = (+r[1]) * scale, node = +r[2], roll = +r[3] || 0, fcode = +r[4] || 0, wide = +r[5] === 2;
+				const lenCol = ver >= 13 ? r[9] : r[8];
+				if (node === 1 || !sec) { finish(); sec = { t, wide, pts: [] }; }
+				const ry = t - sec.t, last = sec.pts[sec.pts.length - 1];
+				if (last && last.ry === ry) last.vf = v; // second row on the same tick: slam
+				else sec.pts.push({ ry, v, vf: v });
+				filterEvents.push({ t, code: fcode });
+				if (roll) {
+					const nx = lr[i + 1], dir = nx && tick(nx[0]) === t ? Math.sign((+nx[1]) * scale - v) || 1 : 1;
+					const len = +lenCol || 0, beats = roll >= 6 ? (len ? len / 10 : DEF_ROLL[roll]) : (len || DEF_ROLL[roll]);
+					c.spins.push({ id: id(), t, kind: roll === 5 || roll === 7 ? 'half' : 'spin', dir: -dir, l: Math.max(60, Math.round(beats / 2 * 240)), amp: 250, rep: 3, dec: 2 });
+				}
+				if (node === 2) finish();
+			}
+			finish();
+			c.laser[lane] = out.map(sc => ({ id: id(), t: sc.t, wide: sc.wide, pts: sc.pts.map(p => ({ id: id(), ry: p.ry, v: p.v, vf: p.vf, a: 0, b: 0 })) })).sort((a, b) => a.t - b.t);
+		});
+		c.spins.sort((a, b) => a.t - b.t);
+		// laser effects: per-node filter codes, plus "auto tab" spans that run an FX effect on the lasers
+		const autoTab = rows('TRACK AUTO TAB').map(r => ({ t: tick(r[0]), e: tick(r[0]) + Math.round((+r[1] || 0) * 240 / res), fx: pairFx[(+r[2] || 0) - 2] })).filter(a => a.fx);
+		const filterName = (code) => code === 0 || code === 6 ? 'peak' : (tabFx[code - 1] || 'peak');
+		filterEvents.sort((a, b) => a.t - b.t);
+		const changes = [];
+		let curF = 'peak';
+		const autoAt = (t) => autoTab.find(a => t >= a.t && t < a.e);
+		const pts = [...new Set([...filterEvents.map(e => e.t), ...autoTab.flatMap(a => [a.t, a.e])])].sort((a, b) => a - b);
+		let fi = 0, base = 'peak';
+		for (const t of pts) {
+			while (fi < filterEvents.length && filterEvents[fi].t <= t) base = filterName(filterEvents[fi++].code);
+			const at = autoAt(t);
+			let want = base;
+			if (at) {
+				const name = define('filter', 'AT_' + at.fx.ksh, kshDefParams(at.fx.ksh), at.fx.f);
+				want = name;
+			}
+			if (want !== curF) { changes.push({ id: id(), t, v: want }); curF = want; }
+		}
+		c.filterType = changes.filter((e, i) => !(i === 0 && e.t === 0 && e.v === 'peak'));
+		c.defs = defLines;
+		if (autoTab.length) warn('Laser "auto tab" effects were imported as custom laser effects (#define_filter); USC plays them, KSM v1 may not.');
+		// camera (SPCONTROLER segments)
+		const graphs = {};
+		for (const r of rows('SPCONTROLER')) {
+			const name = r[1], t = tick(r[0]), len = Math.round((+r[3] || 0) * 240 / res), a = parseFloat(r[4]), b = parseFloat(r[5]);
+			if (!['CAM_RotX', 'CAM_Radi', 'Tilt', 'Morphing2'].includes(name)) { if (!['Realize', 'AIRL_ScaX', 'AIRR_ScaX'].includes(name)) warn('SPCONTROLER "' + name + '" has no KSH equivalent and was skipped.', t); continue; }
+			(graphs[name] = graphs[name] || []).push({ t, len, a, b });
+		}
+		const toGraph = (segs, conv, round) => {
+			const out = []; segs.sort((x, y) => x.t - y.t || x.len - y.len);
+			const fmt = (v) => round ? Math.round(v) : Math.round(v * 100) / 100;
+			const put = (t, v) => { const l = out[out.length - 1]; if (l && l.t === t) { if (l.v !== v) l.vf = v; else delete l.vf; } else if (!l || (l.vf ?? l.v) !== v || true) out.push({ id: id(), t, v, a: 0, b: 0 }); };
+			for (const sg of segs) { put(sg.t, fmt(conv(sg.a))); if (sg.len > 0) put(sg.t + sg.len, fmt(conv(sg.b))); }
+			// drop points that sit on a straight line between their neighbours
+			return out.filter((p, i) => {
+				const q = out[i - 1], n = out[i + 1];
+				if (!q || !n || p.vf !== undefined || q.vf !== undefined) return true;
+				const lin = q.v + (n.v - q.v) * (p.t - q.t) / (n.t - q.t);
+				return Math.abs(lin - p.v) > 0.01;
+			});
+		};
+		if (graphs.CAM_RotX) c.cam.zoom_top = toGraph(graphs.CAM_RotX, CAM.zoomTop, true);
+		if (graphs.CAM_Radi) c.cam.zoom_bottom = toGraph(graphs.CAM_Radi, CAM.zoomBottom, true);
+		if (graphs.Morphing2) c.cam.center_split = toGraph(graphs.Morphing2, CAM.splitIn, true);
+		// tilt: modes, then manual segments (auto tilt comes back after a manual series ends)
+		const tilt = [];
+		for (const r of rows('TILT MODE INFO')) { const t = tick(r[0]), m = +r[1]; tilt.push({ id: id(), t, v: m === 2 ? 'keep_bigger' : m === 1 ? 'bigger' : 'normal', a: 0, b: 0 }); }
+		if (graphs.Tilt) {
+			const segs = graphs.Tilt.sort((x, y) => x.t - y.t);
+			let i = 0;
+			while (i < segs.length) {
+				let j = i; while (j + 1 < segs.length && segs[j + 1].t <= segs[j].t + segs[j].len) j++;
+				const series = toGraph(segs.slice(i, j + 1), CAM.tiltIn, false);
+				const endT = segs[j].t + segs[j].len;
+				const mode = K.lastAtOrBefore(tilt.filter(p => typeof p.v === 'string'), endT);
+				for (const p of series) { const k = tilt.findIndex(x => x.t === p.t); if (k >= 0) tilt.splice(k, 1); tilt.push(p); }
+				const lastP = series[series.length - 1];
+				if (lastP) lastP.vf = mode ? mode.v : 'normal';
+				i = j + 1;
+			}
+		}
+		c.tilt = tilt.sort((a, b) => a.t - b.t).filter((p, i, arr) => !(i === 0 && p.t === 0 && p.v === 'normal' && arr.length === 1));
+		// header
+		const fbase = String(fileName || 'chart.vox').replace(/\.vox$/i, '');
+		const m = /_(\d)([naeimuhgvx])$/i.exec(fbase);
+		c.meta.title = fbase.replace(/^\d+_/, '').replace(/_\d[a-z]$/i, '');
+		c.meta.difficulty = m ? ({ 1: 'light', 2: 'challenge', 3: 'extended' })[m[1]] || 'infinite' : 'infinite';
+		c.meta.pfiltergain = '50'; c.meta.chokkakuvol = '50'; c.meta.filtertype = 'peak'; c.meta.o = '0';
+		warnings.push({ t: 0, msg: 'Imported from SOUND VOLTEX .vox (format ' + ver + '). Title, artist and level are not stored in .vox files; set them in the Chart tab and load the song audio.' });
+		return { chart: c, warnings };
+	}
+	// thin dense laser samples (v12 stores curves every few cells) so the chart stays editable and valid KSH:
+	// keep slams and corners, drop points that lie on a straight line within half a laser step, keep points > 1/32 apart
+	function simplifyLaser(sec) {
+		const P = sec.pts;
+		const keep = new Array(P.length).fill(false);
+		keep[0] = keep[P.length - 1] = true;
+		P.forEach((p, i) => { if (p.v !== p.vf) { keep[i] = true; } });
+		const rdp = (a, b) => {
+			if (b <= a + 1) return;
+			const pa = P[a], pb = P[b];
+			let worst = -1, wd = 0.6;
+			for (let i = a + 1; i < b; i++) {
+				const p = P[i], lin = pa.vf + (pb.v - pa.vf) * (p.ry - pa.ry) / (pb.ry - pa.ry);
+				const d = Math.max(Math.abs(p.v - lin), Math.abs(p.vf - lin));
+				if (d > wd) { wd = d; worst = i; }
+			}
+			if (worst >= 0) { keep[worst] = true; rdp(a, worst); rdp(worst, b); }
+		};
+		let a = 0;
+		for (let i = 1; i < P.length; i++) if (keep[i]) { rdp(a, i); a = i; }
+		let out = P.filter((_, i) => keep[i]);
+		// KSH reads two different values closer than 1/32 as a slam: thin those
+		out = out.filter((p, i) => { const q = out[i - 1]; return !q || p.v !== p.vf || i === out.length - 1 || p.ry - q.ry > 30; });
+		for (let i = out.length - 1; i > 0; i--) { const p = out[i], q = out[i - 1]; if (p.v === p.vf && q.v === q.vf && p.ry - q.ry <= 30 && i - 1 > 0) out.splice(i - 1, 1); }
+		return { t: sec.t, wide: sec.wide, pts: out.map(p => ({ ...p, v: Math.round(p.v), vf: Math.round(p.vf) })) };
 	}
 
 	// ---------------------------------------------------------------- MS-ADPCM WAV + 2DX
@@ -324,23 +574,25 @@ const SDVX = (() => {
 		return new Uint8Array(out);
 	}
 	const xmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-	function musicDb(o) {
+	function chartEntry(o, sl, on) {
 		const T = (name, v, type) => `<${name}${type ? ` __type="${type}"` : ''}>${xmlEsc(v)}</${name}>`;
-		const charts = SLOTS.map(sl => {
-			const on = sl.id === o.slot;
-			return `      <${sl.id}>\n` + [
-				T('difnum', on ? o.difnum : 0, 'u8'), T('illustrator', on ? o.illustrator : ''), T('effected_by', on ? o.effector : ''),
-				T('price', -1, 's32'), T('limited', 3, 'u8'), T('jacket_print', -2, 's32'), T('jacket_mask', 0, 's32'), T('max_exscore', 0, 's32'),
-			].map(x => '        ' + x).join('\n') + '\n        <radar>\n' + ['notes', 'peak', 'tsumami', 'tricky', 'hand_trip', 'one_hand'].map(k => '          ' + T(k, 0, 'u16')).join('\n') + `\n        </radar>\n      </${sl.id}>`;
-		}).join('\n');
+		return `      <${sl.id}>\n` + [
+			T('difnum', on ? o.difnum : 0, 'u8'), T('illustrator', on ? o.illustrator : ''), T('effected_by', on ? o.effector : ''),
+			T('price', -1, 's32'), T('limited', 3, 'u8'), T('jacket_print', -2, 's32'), T('jacket_mask', 0, 's32'), T('max_exscore', 0, 's32'),
+		].map(x => '        ' + x).join('\n') + '\n        <radar>\n' + ['notes', 'peak', 'tsumami', 'tricky', 'hand_trip', 'one_hand'].map(k => '          ' + T(k, 0, 'u16')).join('\n') + `\n        </radar>\n      </${sl.id}>`;
+	}
+	function musicEntry(o) {
+		const T = (name, v, type) => `<${name}${type ? ` __type="${type}"` : ''}>${xmlEsc(v)}</${name}>`;
+		const charts = SLOTS.map(sl => chartEntry(o, sl, sl.id === o.slot)).join('\n');
 		const info = [
 			T('title_name', o.title), T('title_yomigana', o.titleYomi || o.title), T('artist_name', o.artist), T('artist_yomigana', o.artistYomi || o.artist),
 			T('ascii', o.ascii), T('bpm_max', Math.round(o.bpmMax * 100), 'u32'), T('bpm_min', Math.round(o.bpmMin * 100), 'u32'),
 			T('distribution_date', o.date, 'u32'), T('volume', o.volume, 'u16'), T('bg_no', o.bgNo ?? 2, 'u16'), T('genre', 0, 'u32'),
 			T('is_fixed', 1, 'u8'), T('version', o.version, 'u8'), T('demo_pri', 0, 's8'), T('inf_ver', o.infVer, 'u8'),
 		].map(x => '      ' + x).join('\n');
-		return `<?xml version="1.0" encoding="shift-jis"?>\n<mdb>\n  <music id="${o.id}">\n    <info>\n${info}\n    </info>\n    <difficulty>\n${charts}\n    </difficulty>\n  </music>\n</mdb>\n`;
+		return `  <music id="${o.id}">\n    <info>\n${info}\n    </info>\n    <difficulty>\n${charts}\n    </difficulty>\n  </music>\n`;
 	}
+	function musicDb(o) { return `<?xml version="1.0" encoding="shift-jis"?>\n<mdb>\n${musicEntry(o)}</mdb>\n`; }
 
 	// ---------------------------------------------------------------- zip (store only)
 	let CRC = null;
@@ -386,10 +638,11 @@ const SDVX = (() => {
 		return out;
 	}
 	// o: {id, ascii, slot, difnum, version, infVer, volume, laserEdge, title, artist, titleYomi, artistYomi, illustrator, effector, jacket(File), audioBytes(ArrayBuffer), offsetMs, previewMs, previewLen, bpmMin, bpmMax}
+	// Zip layout = the game's own data/music/<id>_<name>/ folder, plus the music_db entry to paste into data/others/music_db.xml.
 	async function buildPackage(chart, o, progress) {
 		const files = [], warnings = [];
-		const stem = pad(o.id, 4) + '_' + o.ascii, slot = SLOTS.find(s => s.id === o.slot), dir = o.ascii + '/music/' + stem + '/';
-		const vox = buildVox(chart, { laserEdge: o.laserEdge });
+		const stem = pad(o.id, 4) + '_' + o.ascii, slot = SLOTS.find(s => s.id === o.slot), dir = stem + '/';
+		const vox = buildVox(chart, { laserEdge: o.laserEdge, format: o.format });
 		warnings.push(...vox.warnings);
 		files.push({ name: dir + stem + '_' + slot.n + slot.l + '.vox', data: new TextEncoder().encode(vox.text) });
 		if (o.audioBytes) {
@@ -401,29 +654,33 @@ const SDVX = (() => {
 			const [l, r] = sliceAudio(buf, start, buf.duration - start, 0, 0);
 			files.push({ name: dir + stem + '.2dx', data: make2dx(stem + '.2dx', encodeAdpcmWav(l, r, 44100)) });
 			progress && progress('Encoding preview…'); await new Promise(r2 => setTimeout(r2, 30));
-			const pl = (o.previewLen > 0 ? o.previewLen : 15000) / 1000;
+			const pl = (o.previewLen > 0 ? o.previewLen : 10000) / 1000;
 			const [pl0, pr0] = sliceAudio(buf, (o.previewMs || 0) / 1000, pl, 0.3, 1.5);
 			files.push({ name: dir + stem + '_pre.2dx', data: make2dx(stem + '_pre.2dx', encodeAdpcmWav(pl0, pr0, 44100)) });
-		} else warnings.push({ t: 0, msg: 'No audio loaded: the .2dx files were not created.' });
+		} else if (!o.existing) warnings.push({ t: 0, msg: 'No audio loaded: the .2dx files were not created.' });
 		if (o.jacket) {
 			progress && progress('Making jackets…');
-			const j = await jacketPngs(o.jacket, { n: 300, s: 108, b: 676, t: 128 });
+			const j = await jacketPngs(o.jacket, { n: 300, s: 108, b: 676 });
 			const jb = 'jk_' + pad(o.id, 4) + '_' + slot.n;
-			files.push({ name: dir + jb + '.png', data: j.n }, { name: dir + jb + '_s.png', data: j.s }, { name: dir + jb + '_b.png', data: j.b });
-			files.push({ name: o.ascii + '/graphics/s_jacket00_ifs/' + jb + '_t.png', data: j.t });
-		} else warnings.push({ t: 0, msg: 'No jacket image chosen: the game will show a blank jacket.' });
+			files.push({ name: dir + jb + '.png', data: j.n }, { name: dir + jb + '_b.png', data: j.b }, { name: dir + jb + '_s.png', data: j.s });
+		} else warnings.push({ t: 0, msg: 'No jacket image chosen: this chart will show a blank jacket.' });
 		const bad = new Set();
-		const db = sjisEncode(musicDb({ ...o, date: o.date || Number(new Date().toISOString().slice(0, 10).replace(/-/g, '')) }), bad);
+		const date = o.date || Number(new Date().toISOString().slice(0, 10).replace(/-/g, ''));
+		const xml = o.existing
+			? '<!-- Song ' + o.id + ' is already in data/others/music_db.xml. In its <difficulty> section, replace the <' + slot.id + '> ... </' + slot.id + '> block with this one. -->\r\n' + chartEntry({ ...o, date }, slot, true).replace(/\n/g, '\r\n')
+			: '<!-- Paste the <music> element below into data/others/music_db.xml, just before the closing </mdb> line. Keep that file in Shift-JIS. -->\r\n' + musicEntry({ ...o, date }).replace(/\n/g, '\r\n');
+		files.push({ name: 'music_db entry (' + stem + ').xml', data: sjisEncode('<?xml version="1.0" encoding="shift-jis"?>\r\n' + xml, bad) });
 		if (bad.size) warnings.push({ t: 0, msg: 'These characters cannot be written in Shift-JIS and became "?": ' + [...bad].join(' ') });
-		files.push({ name: o.ascii + '/others/music_db.merged.xml', data: db });
-		files.push({ name: o.ascii + '/README.txt', data: new TextEncoder().encode(
-			'Copy the "' + o.ascii + '" folder into your game\'s data_mods folder (LayeredFS).\r\n' +
-			'Song id ' + o.id + ', chart slot ' + slot.label + '.\r\n' +
-			'others/music_db.merged.xml holds this song\'s entry; if your setup merges music_db files by hand, add the <music> element to your music_db.xml.\r\n\r\n' +
+		files.push({ name: 'README.txt', data: new TextEncoder().encode(
+			'1. Copy the folder "' + stem + '" into your game\'s data/music folder' + (o.existing ? ' (merge it with the existing folder of song ' + o.id + ').' : '.') + '\r\n' +
+			'2. Open data/others/music_db.xml (Shift-JIS) and ' + (o.existing ? 'replace the <' + slot.id + '> block of song ' + o.id + ' with the one in "music_db entry (' + stem + ').xml".' : 'paste the <music> element from "music_db entry (' + stem + ').xml" just before </mdb>. The song id ' + o.id + ' must not be used by another song.') + '\r\n' +
+			'   (If you use data_mods / LayeredFS instead, the same entry can go in data_mods/<mod>/others/music_db.merged.xml inside <mdb> ... </mdb>.)\r\n' +
+			'3. Chart slot: ' + slot.label + ' (' + stem + '_' + slot.n + slot.l + '.vox).\r\n' +
+			'Audio is .2dx (MS-ADPCM). The game also loads .2dx songs (older songs use it); if yours does not play, convert the song to .s3v (WMA Pro) with another tool and keep the same file names.\r\n\r\n' +
 			(warnings.length ? 'Notes from the export:\r\n' + warnings.map(w => '- ' + w.msg).join('\r\n') + '\r\n' : '')) });
-		return { blob: zip(files), files, warnings };
+		return { blob: zip(files), files, warnings, stem };
 	}
 
-	return { SLOTS, KSH_DIFF_SLOT, buildVox, encodeAdpcmWav, decodeAdpcmWav, make2dx, sliceAudio, sjisEncode, musicDb, zip, crc32, buildPackage };
+	return { SLOTS, KSH_DIFF_SLOT, CAM, importVox, buildVox, encodeAdpcmWav, decodeAdpcmWav, make2dx, sliceAudio, sjisEncode, musicDb, zip, crc32, buildPackage };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = SDVX;

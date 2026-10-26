@@ -7,6 +7,8 @@ const assert = require('assert');
 global.K = require('../src/core.js');
 global.KSMFX = require('../src/fx.js');
 const SDVX = require('../src/sdvx.js');
+const vox10 = (c) => SDVX.buildVox(c, { format: 10 }).text;
+const vox12 = (c) => SDVX.buildVox(c, { format: 12 }).text.replace(/\r\n/g, '\n');
 
 let failures = 0, checks = 0;
 function check(name, fn) {
@@ -39,7 +41,7 @@ check('positions use the time signature\'s own beat unit', () => {
 	const c = K.newChart();
 	c.sig = [P({ m: 0, n: 4, d: 4 }), P({ m: 1, n: 9, d: 8 })];
 	c.bt[0] = [P({ t: 960 + 120 * 3 + 40, l: 0 })]; // measure 2 (9/8): 4th eighth note + 1/48 note
-	const v = SDVX.buildVox(c).text;
+	const v = vox12(c);
 	assert.ok(v.includes('#TRACK3\n002,04,08\t0\t0\n#END'), v.slice(v.indexOf('#TRACK3'), v.indexOf('#TRACK3') + 40));
 	assert.ok(v.includes('#BEAT INFO\n001,01,00\t4\t4\n002,01,00\t9\t8\n#END'));
 });
@@ -48,33 +50,42 @@ check('lasers: start/continue/end nodes, slams as two rows, filter and wide flag
 	c.filterType = [P({ t: 480, v: 'lpf1' })];
 	c.laser[0] = [P({ t: 0, wide: false, pts: [P({ ry: 0, v: 0, vf: 0 }), P({ ry: 480, v: 50, vf: 25 }), P({ ry: 960, v: 0, vf: 50 })] })];
 	c.spins = [P({ t: 960, kind: 'spin', dir: 1, l: 360 })];
-	const v = SDVX.buildVox(c).text;
+	const v = vox10(c);
 	const rows = v.slice(v.indexOf('#TRACK1\n') + 8, v.indexOf('#END', v.indexOf('#TRACK1'))).trim().split('\n');
 	assert.deepStrictEqual(rows, ['001,01,00\t0\t1\t0\t0\t1\t0', '001,03,00\t124\t0\t0\t1\t1\t0', '001,03,00\t62\t0\t0\t1\t1\t0', '002,01,00\t0\t0\t3\t1\t1\t0', '002,01,00\t124\t2\t0\t1\t1\t0']);
+});
+check('format 12: decimal laser positions, explicit spin length in 1/10 beats, CRLF', () => {
+	const c = K.newChart();
+	c.laser[1] = [P({ t: 0, wide: true, pts: [P({ ry: 0, v: 50, vf: 50 }), P({ ry: 480, v: 25, vf: 0 })] })];
+	c.spins = [P({ t: 480, kind: 'spin', dir: -1, l: 360 })];
+	const raw = SDVX.buildVox(c).text;
+	assert.ok(raw.includes('#FORMAT VERSION\r\n12\r\n'));
+	const rows = raw.replace(/\r\n/g, '\n').split('#TRACK8\n')[1].split('\n#END')[0].split('\n');
+	assert.deepStrictEqual(rows, ['001,01,00\t1.000000\t1\t0\t0\t2\t0\t0\t0', '001,03,00\t0.500000\t0\t6\t0\t2\t0\t0\t30', '001,03,00\t0.000000\t2\t0\t0\t2\t0\t0\t0']);
 });
 check('FX holds get one effect pair each (2-indexed), holds without effect use 0', () => {
 	const c = K.newChart();
 	c.fx[0] = [P({ t: 0, l: 240, fx: 'Retrigger;16' }), P({ t: 960, l: 240 })];
 	c.fx[1] = [P({ t: 0, l: 240, fx: 'Gate;8' }), P({ t: 1920, l: 0, se: 'clap' })];
-	const v = SDVX.buildVox(c).text;
+	const v = vox12(c);
 	assert.ok(v.includes('#FXBUTTON EFFECT INFO\n1,\t8,\t95.00,\t2.00,\t1.00,\t0.85,\t0.15\n0,\t0,\t0,\t0,\t0,\t0,\t0\n\n2,\t100.00,\t4,\t1.00\n'));
 	assert.ok(v.includes('#TRACK2\n001,01,00\t48\t2\n002,01,00\t48\t0\n#END'));
 	assert.ok(v.includes('#TRACK7\n001,01,00\t48\t3\n003,01,00\t0\t3\n#END'));
 });
-check('camera: zoom_top -> CAM_RotX tanh, zoom_bottom -> CAM_Radi -tanh, tilt sign flipped', () => {
+check('camera: zoom_top -> CAM_RotX, zoom_bottom -> CAM_Radi (linear, from the 777 conversion), tilt / -1.5', () => {
 	const c = K.newChart();
 	c.cam.zoom_top = [P({ t: 960, v: 0 }), P({ t: 1920, v: -40 })];
 	c.cam.zoom_bottom = [P({ t: 960, v: 30 })];
 	c.tilt = [P({ t: 960, v: -1.2 }), P({ t: 1200, v: 0 }), P({ t: 1920, v: 'normal' })];
-	const v = SDVX.buildVox(c).text;
-	assert.ok(v.includes('002,01,00\tCAM_RotX\t2\t192\t0.00\t-0.38\t0.00\t0.00'));
-	assert.ok(v.includes('001,01,00\tCAM_Radi\t2\t0\t-0.29\t-0.29\t0.00\t0.00'));
-	assert.ok(v.includes('002,01,00\tTilt\t2\t48\t1.20\t0.00\t0.00\t0.00'));
+	const v = vox12(c);
+	assert.ok(v.includes('002,01,00\tCAM_RotX\t2\t192\t0.00\t-0.33\t0.00\t0.00'));
+	assert.ok(v.includes('001,01,00\tCAM_Radi\t2\t192\t-0.40\t-0.40\t0.00\t0.00\n002,01,00\tCAM_Radi\t2\t'), 'hold rows from the start and to the end like the game\'s files');
+	assert.ok(v.includes('002,01,00\tTilt\t2\t48\t0.80\t0.00\t0.00\t0.00'));
 });
 const [kshPath, voxPath] = process.argv.slice(2);
 if (kshPath && voxPath && fs.existsSync(kshPath) && fs.existsSync(voxPath)) {
 	const { chart } = K.importKsh(fs.readFileSync(kshPath));
-	const ours = SDVX.buildVox(chart, { laserEdge: 124 }).text;
+	const ours = SDVX.buildVox(chart, { laserEdge: 124, format: 10 }).text;
 	const parse = (txt) => { const S = {}; let sec = null; for (const l of txt.split(/\r?\n/)) { if (l.startsWith('//') || !l.trim()) continue; if (l.startsWith('#')) { sec = l === '#END' ? null : l.slice(1); if (sec) S[sec] = S[sec] || []; continue; } if (sec) S[sec].push(l); } return S; };
 	const A = parse(ours), B = parse(fs.readFileSync(voxPath, 'utf8'));
 	const same = (name, n) => { const a = A[name].map(r => r.split('\t').slice(0, n).join('\t')), b = B[name].map(r => r.split('\t').slice(0, n).join('\t')); assert.deepStrictEqual(a, b); };

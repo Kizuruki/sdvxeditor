@@ -14,9 +14,10 @@ A fast SDVX / K-Shoot MANIA chart editor in the style of MikuMikuWorld. It runs 
 - **SDVX-style preview** built on a direct port of USC's camera. It covers zoom_top/bottom/side, center split, rotation around the far end of the lane, spins and swings, and the game's own automatic laser tilt (normal/bigger/biggest/keep/zero, pre-tilt, slam roll and shake). Speed is set like EG's LANE-SPEED (BPM × hi-speed ÷ 100), and there is a DRAW offset. The pane can be resized.
 - **Engine tilt you can see and override**: the Tilt column shows the tilt the game will apply as a dashed line. Each laser can turn auto tilt off (`tilt=zero`) or change it for its span.
 - **Slam kicks**: newly drawn slams can add a `zoom_side` kick (±30 by default) that jumps the lane in the slam's direction and eases back. The kicks are ordinary keyframes, and you can add or remove them for selected or all slams.
-- **Hear the effects**: FX hold effects and the laser filter (peak/LPF/HPF/bitcrush, `filtertype`, `pfiltergain`) are applied to the music during playback by an AudioWorklet port of USC's DSP. Slam sounds follow `chokkakuse`/`chokkakuvol`, and FX chips play their key sounds.
+- **Hear the effects**: FX hold effects and the laser filter are applied to the music during playback by an AudioWorklet, in one of two modes (Settings → *Effects sound like*). *SOUND VOLTEX* (default) models the arcade engine with the exact parameters the `.vox` export writes: the built-in peak filter that follows the knob 80 ms late and ducks the music, knob-swept LPF/HPF/bitcrush, grid-locked Retrigger, the game's Gate pattern, multi-pass Flanger, Side Chain, Tape Stop, Wobble and Echo, and overlapping FX holds replacing rather than stacking. *USC* is a port of USC's DSP and honours `filtertype` / `pfiltergain`. Slam sounds follow `chokkakuse`/`chokkakuvol`, and FX chips play their key sounds.
 - **Every object is selectable**, including laser effect, filter gain, slam volume/sound, BPM, stops, spins, camera keys and raw KSH lines. You can box-select, move, copy/paste and delete all of them, and each type has a plain explanation in tooltips and the Properties panel.
-- **Exports**: `.ksh` for KSM, *Export for USC* (curves baked, `scroll_speed` as percent, `rotation_deg` → tilt), and *Export for SOUND VOLTEX*. The SDVX export makes a data_mods `.zip` with a `.vox` chart (format 10), song and preview `.2dx` (MS-ADPCM, the same layout as the game's files), jackets and a Shift-JIS `music_db` entry. It also lists anything that could not be converted.
+- **Exports**: `.ksh` for KSM, *Export for USC* (curves baked, `scroll_speed` as percent, `rotation_deg` → tilt), and *Export for SOUND VOLTEX*. The SDVX export makes a `.zip` laid out like the game's `data/music/<id>_<name>/` folder: the `.vox` chart (format 12, or 10 for older tools), song and preview `.2dx` (MS-ADPCM, the same layout as the game's files) and the three jacket sizes, plus a Shift-JIS `music_db` entry and a README. Laser FX effects become `#TRACK AUTO TAB` spans. It also lists anything that could not be converted.
+- **Open official `.vox` charts**: notes, lasers, spins, BPM / beat changes, camera graphs and every FX hold, laser and auto-tab effect come in. Effects keep their exact SDVX parameters (as `sdvx=` in `#define_fx` / `#define_filter`, which USC and KSM ignore), so playback and a re-export match the original.
 - **Editing tools**: copy/paste at the cursor, mirrored paste, mirror selection, box select, nudge, and undo/redo (400 steps).
 - **Chart check tab**: warns about things KSH can't store, like holds that touch end-to-start, overlapping lasers, or 1/32 segments that turn into slams.
 - **Autosave** to the browser, with a restore option.
@@ -54,7 +55,7 @@ Importing a chart and saving it again keeps everything, including unknown option
 
 ```
 src/core.js      chart model, timing, KSH import/export, validation (no DOM; portable)
-src/fx.js        FX hold / laser effects (USC DSP port) running in an AudioWorklet
+src/fx.js        FX hold / laser effects (SOUND VOLTEX engine model + USC DSP port) running in an AudioWorklet
 src/audio.js     Web Audio playback clock, hitsound scheduling, waveform peaks
 src/sdvx.js      SOUND VOLTEX export: .vox writer, MS-ADPCM + .2dx, music_db, zip
 src/timeline.js  MMW-style timeline renderer
@@ -69,6 +70,7 @@ node build.js                                              # rebuild index.html
 git clone https://github.com/kshootmania/libkson ../libkson
 node tests/core.test.js ../libkson/tests/assets            # KSH tests against libkson's charts
 node tests/export.test.js [chart.ksh reference.vox]        # USC / SDVX exporters (optionally vs a known-good .vox)
+node tests/fx.test.js                                      # effect engine, rendered offline
 node tests/make_wav.js click150.wav 150 0.5 40             # test click track
 npm i playwright && node tests/e2e.js <dir with click150.wav> <screenshot dir>
 ```
