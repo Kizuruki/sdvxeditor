@@ -1,0 +1,14 @@
+{
+  "name": "ksm-chart-editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SDVX / K-Shoot MANIA (.ksh) chart editor in the style of MikuMikuWorld",
+  "scripts": {
+    "build": "node build.js",
+    "test": "node tests/core.test.js ../libkson/tests/assets",
+    "test:e2e": "node tests/make_wav.js tests/.out/click150.wav 150 0.5 40 && node tests/e2e.js tests/.out tests/.out"
+  },
+  "devDependencies": {
+    "playwright": "^1.47.0"
+  }
+}
