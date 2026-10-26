@@ -69,6 +69,7 @@ class AudioEngine {
 	async load(arrayBuffer, name) {
 		const ctx = this.ensure();
 		const buf = await ctx.decodeAudioData(arrayBuffer.slice(0));
+		this.srcBytes = arrayBuffer; // original file, re-decoded at 44.1 kHz for the SDVX export
 		this.buffer = buf; this.fileName = name || '';
 		this.pcmSent = false;
 		this._buildPeaks();

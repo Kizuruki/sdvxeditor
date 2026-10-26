@@ -6,7 +6,7 @@ let fails = 0;
 const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL ') + m); if (!c) fails++; };
 (async () => {
   const b = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-  const p = await b.newPage({ viewport: { width: 1500, height: 900 } });
+  const p = await b.newPage({ viewport: { width: 1500, height: 900 }, acceptDownloads: true });
   const errs = [];
   p.on('pageerror', e => errs.push(e.message + '\n' + e.stack));
   p.on('dialog', d => d.accept());
@@ -191,6 +191,21 @@ const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL ') + m); if (!c) fail
   ok(/low-pass/.test(await p.locator('#popover .note').first().textContent()), 'add popover explains the laser effect');
   await p.keyboard.press('Escape');
   await p.evaluate(() => { const { ed } = window.KSMEditor; ed.edit('cleanup', c => { c.pfilterGain = []; c.filterType = []; c.slamVol = []; }); });
+
+  console.log('Exports');
+  await p.click('#menus >> text=File'); await p.click('text=Export for SOUND VOLTEX');
+  await p.waitForSelector('#modal:not(.hidden)');
+  const [zdl] = await Promise.all([p.waitForEvent('download', { timeout: 60000 }), p.click('#modal button:has-text("Export .zip")')]);
+  const zpath = path.join(SHOTS, 'export.zip'); await zdl.saveAs(zpath);
+  const zbytes = require('fs').readFileSync(zpath).toString('latin1');
+  ok(/music\/\d{4}_[\w-]+\/\d{4}_[\w-]+_\d[naeimu]\.vox/.test(zbytes) && /\.2dx/.test(zbytes) && /_pre\.2dx/.test(zbytes) && /others\/music_db\.merged\.xml/.test(zbytes), 'SDVX export downloads a zip with .vox, .2dx, preview and music_db (' + zdl.suggestedFilename() + ')');
+  await p.waitForSelector('#modal:not(.hidden) >> text=SOUND VOLTEX export');
+  await p.click('#modal button:has-text("OK")');
+  await p.click('#menus >> text=File');
+  const [udl] = await Promise.all([p.waitForEvent('download'), p.click('text=Export for USC')]);
+  const upath = path.join(SHOTS, 'usc.ksh'); await udl.saveAs(upath);
+  ok(/^﻿?title=/.test(require('fs').readFileSync(upath, 'utf8')) && /_usc\.ksh$/.test(udl.suggestedFilename()), 'USC export downloads a .ksh');
+  await p.click('#modal button:has-text("OK")');
 
   console.log('Playback clock');
   await click(await pos('gutter', 0));

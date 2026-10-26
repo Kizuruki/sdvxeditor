@@ -98,6 +98,8 @@ function buildMenus() {
 			['Save .ksh', 'Ctrl+S', () => save(false)],
 			['Save .ksh as…', 'Ctrl+Shift+S', () => save(true)],
 			['Export for KSM v1 (bake curves)…', '', exportV1],
+			['Export for USC (unnamed sdvx clone)…', '', exportUsc],
+			['Export for SOUND VOLTEX (.vox + .2dx)…', '', exportSdvxDialog],
 			['View .ksh text…', '', viewKsh],
 			'-',
 			['Restore autosave', '', restoreAutosave],
@@ -768,6 +770,71 @@ function exportV1() {
 	const r = K.exportKsh(ed.chart, { v1: true });
 	download(fileNameNoExt() + '_ksm_v1.ksh', r.text);
 	toast(r.warnings.length ? 'Exported for KSM v1. ' + r.warnings.map(w => w.msg).join(' ') : 'Exported for KSM v1 (nothing needed converting).');
+}
+function exportUsc() {
+	const r = K.exportKsh(ed.chart, { usc: true });
+	download(fileNameNoExt() + '_usc.ksh', r.text);
+	showWarnings('Exported for USC', 'Saved ' + fileNameNoExt() + '_usc.ksh. Put it in the song folder next to the audio file (' + (ed.chart.meta.m || 'music file') + ').', r.warnings, 'USC reads curves as straight steps, scroll_speed as a percentage and has no rotation_deg, so those were converted. Nothing else changed.');
+}
+function showWarnings(title, lead, warnings, okNote) {
+	const list = warnings.length ? h('ul', { class: 'warnlist' }, warnings.map(w => h('li', null, (w.t ? posLabel(ed.timing, w.t, ed.div) + ': ' : '') + w.msg))) : h('div', { class: 'note' }, okNote || 'Nothing needed converting.');
+	showModal(title, h('div', null, h('div', { class: 'note' }, lead), list, h('div', { class: 'btns' }, h('button', { class: 'on', onclick: closeModal }, 'OK'))));
+}
+function exportSdvxDialog() {
+	const m = ed.chart.meta, S = ed.settings;
+	const sanitize = (s) => String(s || '').normalize('NFKD').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase().slice(0, 32);
+	const f = {};
+	const inp = (k, v, w, ph) => (f[k] = h('input', { type: 'text', value: v ?? '', placeholder: ph || '', style: 'width:' + (w || '200px') }));
+	const sel = (k, opts, v) => { f[k] = h('select', null, opts.map(([a, b]) => h('option', { value: a }, b))); f[k].value = v; return f[k]; };
+	const bpms = ed.chart.bpm.map(b => b.v);
+	const slotDef = SDVX.KSH_DIFF_SLOT[m.difficulty] || 'maximum';
+	const jacket = h('input', { type: 'file', accept: 'image/*' });
+	const hasAudio = !!(ed.audio.srcBytes);
+	const audioChk = h('input', { type: 'checkbox', checked: hasAudio, disabled: !hasAudio });
+	const x10 = h('input', { type: 'checkbox', checked: !!S.sdvxLevelX10 });
+	const body = h('div', { class: 'sdvx-export' },
+		h('div', { class: 'note' }, 'Makes a .zip for data_mods: music/<id>_<name>/ with the .vox chart, the song and preview as .2dx, jackets, and others/music_db.merged.xml with the song entry. Settings are remembered.'),
+		row('Song ID', inp('id', S.sdvxId || 2000, '80px'), h('span', { class: 'muted' }, 'must not clash with other songs')),
+		row('ASCII name', inp('ascii', S.sdvxAscii || sanitize(m.title_translit || m.title) || 'custom', '160px'), h('span', { class: 'muted' }, 'letters, digits, _ and -')),
+		row('Chart slot', sel('slot', SDVX.SLOTS.map(s => [s.id, s.label]), slotDef)),
+		row('INF slot type', sel('inf', [['2', 'INF'], ['3', 'GRV'], ['4', 'HVN'], ['5', 'VVD'], ['6', 'XCD']], String(S.sdvxInf || 6)), h('span', { class: 'muted' }, 'only for slot 4')),
+		row('Level', inp('level', m.level || '1', '50px'), h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, x10, '×10 (∇ format, 19.5 → 195)')),
+		row('Game version', sel('version', [['1', '1 BOOTH'], ['2', '2 II'], ['3', '3 III'], ['4', '4 IV'], ['5', '5 V'], ['6', '6 EXCEED GEAR'], ['7', '7 ∇']], String(S.sdvxVersion || 6))),
+		row('Title', inp('title', m.title, '220px')), row('Title (yomigana)', inp('titleYomi', S.sdvxTitleYomi || '', '220px', 'reading in katakana, optional')),
+		row('Artist', inp('artist', m.artist, '220px')), row('Artist (yomigana)', inp('artistYomi', '', '220px', 'optional')),
+		row('Illustrator', inp('illustrator', m.illustrator, '160px')), row('Effected by', inp('effector', m.effect, '160px')),
+		row('BPM range', inp('bpmMin', K.fmtNum(Math.min(...bpms)), '60px'), h('span', { class: 'muted' }, 'to'), inp('bpmMax', K.fmtNum(Math.max(...bpms)), '60px')),
+		row('Music volume', inp('volume', S.sdvxVolume || 91, '50px'), h('span', { class: 'muted' }, 'music_db volume (game default 91)')),
+		row('Laser right edge', sel('edge', [['124', '124 (same as your 2811 files)'], ['127', '127 (full VOX range)']], String(S.sdvxEdge || 124))),
+		row('Jacket image', jacket),
+		row('Song audio', h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, audioChk, hasAudio ? 'make .2dx from ' + ed.audio.fileName : 'load the song first to make .2dx files')),
+		row('Preview', h('span', { class: 'muted' }, 'from ' + ((parseInt(m.po, 10) || 0) / 1000).toFixed(1) + ' s for ' + (((parseInt(m.plength, 10) || 15000)) / 1000).toFixed(1) + ' s (po / plength in the Chart tab)')),
+		h('div', { class: 'note' }, 'The chart offset (o = ' + (m.o || 0) + ' ms) is applied to the audio so measure 1 starts at 0:00, since SDVX has no offset setting.'));
+	const status = h('div', { class: 'note' });
+	const go = async () => {
+		const id = parseInt(f.id.value, 10), ascii = f.ascii.value.trim();
+		if (!(id > 0 && id < 10000)) return toast('Song ID must be 1–9999', true);
+		if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(ascii)) return toast('ASCII name: letters, digits, _ and - only', true);
+		const lv = parseFloat(f.level.value) || 1;
+		Object.assign(S, { sdvxId: id, sdvxAscii: ascii, sdvxInf: +f.inf.value, sdvxVersion: +f.version.value, sdvxVolume: parseInt(f.volume.value, 10) || 91, sdvxEdge: +f.edge.value, sdvxLevelX10: x10.checked });
+		ed.saveSettings();
+		btn.disabled = true;
+		try {
+			const r = await SDVX.buildPackage(ed.chart, {
+				id, ascii, slot: f.slot.value, infVer: f.slot.value === 'infinite' ? +f.inf.value : (f.slot.value === 'maximum' ? 0 : 0),
+				difnum: Math.round(x10.checked ? lv * 10 : lv), version: +f.version.value, volume: K.clamp(parseInt(f.volume.value, 10) || 91, 0, 127),
+				laserEdge: +f.edge.value, title: f.title.value, artist: f.artist.value, titleYomi: f.titleYomi.value, artistYomi: f.artistYomi.value,
+				illustrator: f.illustrator.value, effector: f.effector.value, bpmMin: parseFloat(f.bpmMin.value) || bpms[0], bpmMax: parseFloat(f.bpmMax.value) || bpms[0],
+				jacket: jacket.files[0] || null, audioBytes: audioChk.checked ? ed.audio.srcBytes : null,
+				offsetMs: parseInt(m.o, 10) || 0, previewMs: (parseInt(m.po, 10) || 0), previewLen: parseInt(m.plength, 10) || 15000,
+			}, (msg) => { status.textContent = msg; });
+			const name = String(id).padStart(4, '0') + '_' + ascii + '_sdvx.zip';
+			const a = h('a', { href: URL.createObjectURL(r.blob), download: name }); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+			showWarnings('SOUND VOLTEX export', 'Saved ' + name + ' (' + r.files.length + ' files). Copy the folder inside it to your data_mods folder.', r.warnings, 'Everything converted.');
+		} catch (e) { console.error(e); toast('Export failed: ' + (e.message || e), true); btn.disabled = false; }
+	};
+	const btn = h('button', { class: 'on', onclick: go }, 'Export .zip');
+	showModal('Export for SOUND VOLTEX', h('div', null, body, status, h('div', { class: 'btns' }, btn, h('button', { onclick: closeModal }, 'Cancel'))));
 }
 function viewKsh() {
 	const { text } = K.exportKsh(ed.chart);

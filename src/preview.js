@@ -255,10 +255,10 @@ class Preview3D {
 		// ---- USC camera
 		const lanePitch = uscPitchScale(cam.pitchIn) * cam.pitchUnit;
 		const totalOffset = (cam.offset * (5 * 100) / (6 * 116)) / 2 + cam.bounce;
-		const worldNormal = uscOrigin(lanePitch, totalOffset, (cam.spinRoll + cam.roll) * 360 + cam.rot);
+		const worldNormal = uscOrigin(lanePitch, totalOffset, (cam.spinRoll + cam.roll) * 360 - cam.rot); // rotation_deg has the same sign as tilt (KSM v2: rotation_deg 10 == tilt 1)
 		const worldNoRoll = uscOrigin(lanePitch, 0, 0);
 		const trackOrigin = uscZoomed(worldNormal, cam.zoom);
-		const critOrigin = uscZoomed(uscOrigin(lanePitch, totalOffset, cam.roll * 360 + Math.sin(cam.spinRoll * Math.PI * 2) * 20 + cam.rot), cam.zoom);
+		const critOrigin = uscZoomed(uscOrigin(lanePitch, totalOffset, cam.roll * 360 + Math.sin(cam.spinRoll * Math.PI * 2) * 20 - cam.rot), cam.zoom);
 		const cp = M4.pos(worldNoRoll), cl = Math.hypot(cp[0], cp[1], cp[2]);
 		const rotToCrit = -Math.atan2(cp[1] / cl, -cp[2] / cl) * 180 / Math.PI;
 		const camPitch = rotToCrit - (PV.FOV / 2 - PV.FOV * PV.PITCH_OFFSET);

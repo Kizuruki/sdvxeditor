@@ -381,3 +381,4 @@ const KSMFX = (() => {
 	}
 	return { parseEffect, parseDefines, filterKind, buildSchedule, WORKLET_SRC, addWorklet };
 })();
+if (typeof module !== 'undefined' && module.exports) module.exports = KSMFX;

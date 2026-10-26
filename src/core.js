@@ -689,7 +689,7 @@ function laserToKshSegments(sections) {
 
 function exportKsh(chartIn, opts = {}) {
 	const warnings = [];
-	const c = opts.v1 ? toKsmV1(chartIn, warnings) : chartIn;
+	const c = opts.usc ? toUsc(chartIn, warnings) : opts.v1 ? toKsmV1(chartIn, warnings) : chartIn;
 	const out = [];
 	const timing = new Timing(c);
 	const m = c.meta;
@@ -812,7 +812,11 @@ function exportKsh(chartIn, opts = {}) {
 		for (let i = 0; i < 2; i++) { const g = secAt[i].get(p); if (g && g[0].wide) out.push('laserrange_' + (i ? 'r' : 'l') + '=2x'); }
 		for (let i = 0; i < 2; i++) { const pt = laserPtAt[i].get(p); if (pt && !isLinear(pt)) out.push('laser_' + (i ? 'r' : 'l') + '_curve=' + fmtNum(pt.a) + ';' + fmtNum(pt.b)); }
 		const st = stopAt.get(p); if (st) out.push('stop=' + Math.round(st[0].l / KSH_LEN));
-		const ss = camAt.scroll_speed.get(p); if (ss) writeGraph('scroll_speed', ss[0], false);
+		const ss = camAt.scroll_speed.get(p);
+		if (ss) { // USC reads scroll_speed as an integer percentage
+			if (opts.usc) writeGraph('scroll_speed', { ...ss[0], v: ss[0].v * 100, vf: ss[0].vf !== undefined ? ss[0].vf * 100 : undefined }, true);
+			else writeGraph('scroll_speed', ss[0], false);
+		}
 		const rd = camAt.rotation_deg.get(p); if (rd) writeGraph('rotation_deg', rd[0], false);
 		for (let i = 0; i < 2; i++) {
 			const key = 'fx-' + (i ? 'r' : 'l');
@@ -863,23 +867,69 @@ function exportKsh(chartIn, opts = {}) {
 }
 
 // KSM v1 compatibility: bake curves into linear steps, drop v2-only events
+// Replace curved graph segments by straight steps every `step` ticks
+function bakeGraph(pts, step, roundInt) {
+	const res = [];
+	for (let i = 0; i < pts.length; i++) {
+		const p = pts[i], q = pts[i + 1];
+		res.push({ ...p, a: 0, b: 0 });
+		if (!q || isLinear(p) || typeof q.v !== 'number' || typeof p.v !== 'number') continue;
+		const pv = typeof p.vf === 'number' ? p.vf : p.v;
+		for (let t = p.t + step; t < q.t; t += step) {
+			let v = pv + (q.v - pv) * evalCurve(p.a, p.b, (t - p.t) / (q.t - p.t));
+			v = roundInt ? Math.round(v) : round3(v);
+			res.push({ id: nid(), t, v, a: 0, b: 0 });
+		}
+	}
+	return res;
+}
+// Chart for unnamed sdvx clone (USC): no curves, rotation_deg folded into manual tilt
+// (KSM v2 uses the same sign: rotation_deg 10 == tilt 1); scroll_speed is written as a percentage by exportKsh.
+function toUsc(c, warnings) {
+	const d = toKsmV1({ ...c, cam: { ...c.cam, scroll_speed: [], rotation_deg: [] } }, warnings);
+	d.cam.scroll_speed = bakeGraph(c.cam.scroll_speed, 15, false);
+	const rot = bakeGraph(c.cam.rotation_deg, 15, false);
+	if (rot.some(p => p.v !== 0 || (typeof p.vf === 'number' && p.vf !== 0))) {
+		const tilt = d.tilt;
+		const ticks = [...new Set([...rot.map(p => p.t), ...tilt.map(p => p.t)])].sort((a, b) => a - b);
+		const val = (pts, t, after) => { // linear graph value; after = take the immediate value at t
+			const i = upperBound(pts, t) - 1;
+			if (i < 0) return pts.length ? (typeof pts[0].v === 'number' ? pts[0].v : null) : 0;
+			const p = pts[i];
+			if (p.t === t && !after) { const prev = pts[i - 1]; if (prev && typeof prev.v === 'number' && typeof p.v === 'number') return p.v; return typeof p.v === 'number' ? p.v : null; }
+			const pv = p.vf !== undefined ? p.vf : p.v;
+			if (typeof pv !== 'number') return null;
+			const q = pts[i + 1];
+			if (!q || typeof q.v !== 'number' || p.t === t) return pv;
+			return pv + (q.v - pv) * (t - p.t) / (q.t - p.t);
+		};
+		const modeAt = (t, after) => { // auto-mode string in effect, or null when manual numbers apply
+			const i = upperBound(tilt, after ? t : t - 1) - 1; if (i < 0) return 'normal';
+			const p = tilt[i], v = after || p.t < t ? (p.vf !== undefined ? p.vf : p.v) : p.v;
+			return typeof v === 'string' ? v : null;
+		};
+		const out = []; let replacedAuto = false;
+		for (const t of ticks) {
+			const r0 = val(rot, t, false) || 0, r1 = val(rot, t, true) || 0;
+			const before = val(rot, t - 1, true) || 0, after = val(rot, t + 1, true) || 0;
+			const own = tilt.find(p => p.t === t);
+			if (r0 === 0 && r1 === 0 && before === 0 && after === 0) { if (own) out.push(own); continue; }
+			const m0 = modeAt(t, false), m1 = modeAt(t, true);
+			if ((m0 && r0) || (m1 && r1)) replacedAuto = true;
+			const v0 = round3(r0 / 10 + (m0 ? 0 : (val(tilt, t, false) || 0)));
+			const v1 = r1 === 0 && after === 0 && m1 ? m1 : round3(r1 / 10 + (m1 ? 0 : (val(tilt, t, true) || 0)));
+			const np = { id: nid(), t, v: v0, a: 0, b: 0 };
+			if (v1 !== v0) np.vf = v1;
+			out.push(np);
+		}
+		d.tilt = out;
+		warnings.push({ t: rot[0].t, msg: 'rotation_deg was converted to manual tilt (USC has no rotation_deg).' + (replacedAuto ? ' While the lane is rotated, the automatic laser tilt is off.' : '') });
+	}
+	return d;
+}
 function toKsmV1(c, warnings) {
 	const d = cloneChart(c);
-	const bake = (pts, step, roundInt) => {
-		const res = [];
-		for (let i = 0; i < pts.length; i++) {
-			const p = pts[i], q = pts[i + 1];
-			res.push({ ...p, a: 0, b: 0 });
-			if (!q || isLinear(p) || typeof q.v !== 'number' || typeof p.v !== 'number') continue;
-			const pv = p.vf !== undefined ? p.vf : p.v;
-			for (let t = p.t + step; t < q.t; t += step) {
-				let v = pv + (q.v - pv) * evalCurve(p.a, p.b, (t - p.t) / (q.t - p.t));
-				v = roundInt ? Math.round(v) : round3(v);
-				res.push({ id: nid(), t, v, a: 0, b: 0 });
-			}
-		}
-		return res;
-	};
+	const bake = bakeGraph;
 	let baked = 0;
 	for (const k of ['zoom_top', 'zoom_bottom', 'zoom_side', 'center_split']) { if (d.cam[k].some(p => !isLinear(p))) baked++; d.cam[k] = bake(d.cam[k], 15, true); }
 	if (d.tilt.some(p => !isLinear(p))) baked++;
@@ -944,7 +994,7 @@ function validateChart(c) {
 const KSMCore = {
 	RES, MEAS4, LASER_MAX, SLAM_LEN, KSH_LEN, CAM_KEYS, TILT_AUTO, HEADER_KEYS, FX_EFFECTS, LEGACY_FX_CHARS, LASER_FILTERS,
 	SLAM_SOUNDS, FX_CHIP_SOUNDS, BG_PRESETS, LAYER_PRESETS, DIFFICULTIES, CURVE_PRESETS,
-	nid, newChart, cloneChart, Timing, ScrollMap, importKsh, exportKsh, toKsmV1, validateChart, laserToKshSegments,
+	nid, newChart, cloneChart, Timing, ScrollMap, importKsh, exportKsh, toKsmV1, toUsc, bakeGraph, validateChart, laserToKshSegments,
 	lowerBound, upperBound, lastAtOrBefore, findAt, insertSorted, sortByT, charToLaserX, laserXToChar, laserPos, posToLaserX,
 	evalCurve, isLinear, laserValueAt, graphValueAt, sectionEndTick, fmtNum, autoDispBpm, clamp, decodeKshBytes,
 };
