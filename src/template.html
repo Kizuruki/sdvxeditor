@@ -16,8 +16,9 @@
 	<div id="optbar"></div>
 	<main id="main">
 		<aside id="previewPane">
-			<div class="pane-head"><span>Preview</span><span class="muted" title="Approximation of KSM's camera; check final charts in KSM">approx.</span></div>
+			<div class="pane-head"><span>Preview</span><span id="pvSpeed" class="pv-speed"></span></div>
 			<canvas id="preview"></canvas>
+			<div id="pvResize" title="Drag to resize the preview"></div>
 		</aside>
 		<div id="toolbox"></div>
 		<section id="timelineWrap">
@@ -36,9 +37,11 @@
 <div id="toast" class="toast hidden"></div>
 <input type="file" id="fileInput" multiple hidden accept=".ksh,.kson,.ogg,.mp3,.wav,.flac,.m4a,.opus,.aac,audio/*">
 <!-- @inline core.js -->
+<!-- @inline fx.js -->
 <!-- @inline audio.js -->
 <!-- @inline timeline.js -->
 <!-- @inline preview.js -->
+<!-- @inline sdvx.js -->
 <!-- @inline editor.js -->
 <!-- @inline ui.js -->
 </body>

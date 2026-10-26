@@ -11,7 +11,12 @@ A fast SDVX / K-Shoot MANIA chart editor in the style of MikuMikuWorld. It runs 
 - **Screen effects**: graph columns for `zoom_top`, `zoom_bottom`, `zoom_side`, `tilt`, `rotation_deg`, `center_split` and `scroll_speed`. Each keyframe can have an instant jump and an ease curve.
 - **Lane spins, half spins and swings** ("screen shakes"), attached to slams with length and swing settings.
 - **Timing**: BPM changes, time signatures and stops. FX hold effects (Retrigger, Gate, Flanger, Echo…) and FX chip key sounds. Laser filter type, slam volume, filter gain, comments and raw KSH option lines.
-- **Live preview**: an approximate 3D highway that shows camera, tilt, spin and scroll effects while you edit or play.
+- **SDVX-style preview** built on a direct port of USC's camera. It covers zoom_top/bottom/side, center split, rotation around the far end of the lane, spins and swings, and the game's own automatic laser tilt (normal/bigger/biggest/keep/zero, pre-tilt, slam roll and shake). Speed is set like EG's LANE-SPEED (BPM × hi-speed ÷ 100), and there is a DRAW offset. The pane can be resized.
+- **Engine tilt you can see and override**: the Tilt column shows the tilt the game will apply as a dashed line. Each laser can turn auto tilt off (`tilt=zero`) or change it for its span.
+- **Slam kicks**: newly drawn slams can add a `zoom_side` kick (±30 by default) that jumps the lane in the slam's direction and eases back. The kicks are ordinary keyframes, and you can add or remove them for selected or all slams.
+- **Hear the effects**: FX hold effects and the laser filter (peak/LPF/HPF/bitcrush, `filtertype`, `pfiltergain`) are applied to the music during playback by an AudioWorklet port of USC's DSP. Slam sounds follow `chokkakuse`/`chokkakuvol`, and FX chips play their key sounds.
+- **Every object is selectable**, including laser effect, filter gain, slam volume/sound, BPM, stops, spins, camera keys and raw KSH lines. You can box-select, move, copy/paste and delete all of them, and each type has a plain explanation in tooltips and the Properties panel.
+- **Exports**: `.ksh` for KSM, *Export for USC* (curves baked, `scroll_speed` as percent, `rotation_deg` → tilt), and *Export for SOUND VOLTEX*. The SDVX export makes a data_mods `.zip` with a `.vox` chart (format 10), song and preview `.2dx` (MS-ADPCM, the same layout as the game's files), jackets and a Shift-JIS `music_db` entry. It also lists anything that could not be converted.
 - **Editing tools**: copy/paste at the cursor, mirrored paste, mirror selection, box select, nudge, and undo/redo (400 steps).
 - **Chart check tab**: warns about things KSH can't store, like holds that touch end-to-start, overlapping lasers, or 1/32 segments that turn into slams.
 - **Autosave** to the browser, with a restore option.
@@ -49,9 +54,11 @@ Importing a chart and saving it again keeps everything, including unknown option
 
 ```
 src/core.js      chart model, timing, KSH import/export, validation (no DOM; portable)
+src/fx.js        FX hold / laser effects (USC DSP port) running in an AudioWorklet
 src/audio.js     Web Audio playback clock, hitsound scheduling, waveform peaks
+src/sdvx.js      SOUND VOLTEX export: .vox writer, MS-ADPCM + .2dx, music_db, zip
 src/timeline.js  MMW-style timeline renderer
-src/preview.js   perspective highway preview with camera effects
+src/preview.js   SDVX highway preview (USC camera + engine tilt model)
 src/editor.js    state, undo/redo, tools and mouse editing
 src/ui.js        menus, panels, keyboard, files, main loop
 build.js         inlines src/ into index.html
@@ -61,6 +68,7 @@ build.js         inlines src/ into index.html
 node build.js                                              # rebuild index.html
 git clone https://github.com/kshootmania/libkson ../libkson
 node tests/core.test.js ../libkson/tests/assets            # KSH tests against libkson's charts
+node tests/export.test.js [chart.ksh reference.vox]        # USC / SDVX exporters (optionally vs a known-good .vox)
 node tests/make_wav.js click150.wav 150 0.5 40             # test click track
 npm i playwright && node tests/e2e.js <dir with click150.wav> <screenshot dir>
 ```

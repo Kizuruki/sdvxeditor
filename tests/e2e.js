@@ -6,7 +6,7 @@ let fails = 0;
 const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL ') + m); if (!c) fails++; };
 (async () => {
   const b = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-  const p = await b.newPage({ viewport: { width: 1500, height: 900 } });
+  const p = await b.newPage({ viewport: { width: 1500, height: 900 }, acceptDownloads: true });
   const errs = [];
   p.on('pageerror', e => errs.push(e.message + '\n' + e.stack));
   p.on('dialog', d => d.accept());
@@ -146,6 +146,66 @@ const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL ') + m); if (!c) fail
   await p.waitForTimeout(200);
   ok(await p.locator('#tabs .badge').count() === 1, 'Check tab shows a problem badge for touching holds');
   for (let i = 0; i < 4; i++) await p.keyboard.press('Control+z');
+
+  console.log('Events in the timing column');
+  await p.keyboard.press('1');
+  await p.evaluate(() => { const { ed, K, tl } = window.KSMEditor; ed.edit('setup', c => { c.pfilterGain = [{ id: K.nid(), t: 1920, v: '30' }]; c.filterType = [{ id: K.nid(), t: 1920, v: 'lpf1' }]; c.slamVol = [{ id: K.nid(), t: 2400, v: '80' }]; }); ed.sel = new Set(); tl.bottomTick = 1500; ed.requestDraw(); });
+  await p.waitForTimeout(120);
+  const evRect = (key) => p.evaluate((key) => { const { tl } = window.KSMEditor; const r = tl.cv.getBoundingClientRect(); const h = (tl.timingHits || []).find(x => x.key === key); return h ? { x: r.left + (h.x0 + h.x1) / 2, y: r.top + (h.y0 + h.y1) / 2 } : null; }, key);
+  let q = await evRect('pfilterGain');
+  ok(!!q, 'pfiltergain label is drawn as a clickable item');
+  await p.mouse.move(q.x, q.y); await p.waitForTimeout(60);
+  ok(/strength/i.test(await p.evaluate(() => window.KSMEditor.tl.cv.title)), 'hovering an event shows its explanation as a tooltip');
+  await click(q);
+  ok(await p.evaluate(() => { const { ed } = window.KSMEditor; const e = ed.selected(); return e.length === 1 && e[0].key === 'pfilterGain'; }), 'clicking it selects it');
+  ok(await p.locator('#tabBody .note:has-text("How strong")').count() > 0, 'Properties panel explains the event');
+  // box select across the timing column
+  const tlb = await p.evaluate(() => { const { tl } = window.KSMEditor; const r = tl.cv.getBoundingClientRect(); return { x0: r.left + tl.timingL + 2, x1: r.left + tl.timingR - 2, y0: r.top + tl.yOf(2600), y1: r.top + tl.yOf(1800) }; });
+  await drag({ x: tlb.x0, y: tlb.y0 }, { x: tlb.x1, y: tlb.y1 });
+  const selKinds = await p.evaluate(() => window.KSMEditor.ed.selected().map(e => e.key || e.kind).sort().join(','));
+  ok(selKinds === 'filterType,pfilterGain,slamVol', 'box select in the timing column picks up every event (' + selKinds + ')');
+  // copy + paste at a later cursor
+  await p.keyboard.press('Control+c');
+  await p.evaluate(() => { const { ed } = window.KSMEditor; ed.cursor = 3840; });
+  await p.keyboard.press('Control+v'); await p.waitForTimeout(80);
+  let evs = await p.evaluate(() => { const c = window.KSMEditor.ed.chart; return [c.pfilterGain.map(e => e.t + ':' + e.v), c.filterType.map(e => e.t + ':' + e.v), c.slamVol.map(e => e.t + ':' + e.v)].map(a => a.join(' ')).join(' | '); });
+  ok(evs === '1920:30 3840:30 | 1920:lpf1 3840:lpf1 | 2400:80 4320:80', 'copy/paste duplicates events at the cursor (' + evs + ')');
+  // nudge the pasted selection
+  await p.keyboard.press('Alt+ArrowUp'); await p.waitForTimeout(60);
+  evs = await p.evaluate(() => window.KSMEditor.ed.chart.pfilterGain.map(e => e.t).join(','));
+  ok(evs === '1920,3900', 'Alt+Up moves selected events one step (' + evs + ')');
+  await p.keyboard.press('Delete'); await p.waitForTimeout(60);
+  evs = await p.evaluate(() => { const c = window.KSMEditor.ed.chart; return c.pfilterGain.length + c.filterType.length + c.slamVol.length; });
+  ok(evs === 3, 'Delete removes the selected events');
+  // double-click edits
+  await p.evaluate(() => { const { ed, tl } = window.KSMEditor; ed.sel = new Set(); tl.bottomTick = 1500; ed.requestDraw(); });
+  await p.waitForTimeout(80);
+  q = await evRect('slamVol');
+  await p.mouse.dblclick(q.x, q.y); await p.waitForSelector('#popover:not(.hidden)');
+  await p.fill('#popover input', '65'); await p.press('#popover input', 'Enter'); await p.waitForTimeout(80);
+  ok(await p.evaluate(() => window.KSMEditor.ed.chart.slamVol[0].v) === '65', 'double-click edits slam volume');
+  // click on empty timing space opens the add popover with an explanation
+  const emptyPt = await p.evaluate(() => { const { tl } = window.KSMEditor; const r = tl.cv.getBoundingClientRect(); return { x: r.left + tl.timingL + 30, y: r.top + tl.yOf(2880) - 20 }; });
+  await click(emptyPt); await p.waitForSelector('#popover:not(.hidden)');
+  await p.selectOption('#popover select >> nth=0', 'filterType');
+  ok(/low-pass/.test(await p.locator('#popover .note').first().textContent()), 'add popover explains the laser effect');
+  await p.keyboard.press('Escape');
+  await p.evaluate(() => { const { ed } = window.KSMEditor; ed.edit('cleanup', c => { c.pfilterGain = []; c.filterType = []; c.slamVol = []; }); });
+
+  console.log('Exports');
+  await p.click('#menus >> text=File'); await p.click('text=Export for SOUND VOLTEX');
+  await p.waitForSelector('#modal:not(.hidden)');
+  const [zdl] = await Promise.all([p.waitForEvent('download', { timeout: 60000 }), p.click('#modal button:has-text("Export .zip")')]);
+  const zpath = path.join(SHOTS, 'export.zip'); await zdl.saveAs(zpath);
+  const zbytes = require('fs').readFileSync(zpath).toString('latin1');
+  ok(/music\/\d{4}_[\w-]+\/\d{4}_[\w-]+_\d[naeimu]\.vox/.test(zbytes) && /\.2dx/.test(zbytes) && /_pre\.2dx/.test(zbytes) && /others\/music_db\.merged\.xml/.test(zbytes), 'SDVX export downloads a zip with .vox, .2dx, preview and music_db (' + zdl.suggestedFilename() + ')');
+  await p.waitForSelector('#modal:not(.hidden) >> text=SOUND VOLTEX export');
+  await p.click('#modal button:has-text("OK")');
+  await p.click('#menus >> text=File');
+  const [udl] = await Promise.all([p.waitForEvent('download'), p.click('text=Export for USC')]);
+  const upath = path.join(SHOTS, 'usc.ksh'); await udl.saveAs(upath);
+  ok(/^﻿?title=/.test(require('fs').readFileSync(upath, 'utf8')) && /_usc\.ksh$/.test(udl.suggestedFilename()), 'USC export downloads a .ksh');
+  await p.click('#modal button:has-text("OK")');
 
   console.log('Playback clock');
   await click(await pos('gutter', 0));

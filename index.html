@@ -60,7 +60,13 @@ kbd { font: 10.5px var(--mono); background: #2a2a2f; border: 1px solid #3c3c44; 
 
 /* main area */
 #main { flex: 1; display: flex; min-height: 0; }
-#previewPane { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; background: #0c0c0e; border-right: 1px solid var(--line); }
+#previewPane { position: relative; width: 320px; flex-shrink: 0; display: flex; flex-direction: column; background: #000; border-right: 1px solid var(--line); }
+#pvResize { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: ew-resize; z-index: 5; }
+#pvResize:hover, #pvResize.on { background: rgba(120,160,255,0.25); }
+.pv-speed { display: flex; align-items: center; gap: 3px; font-weight: 400; }
+.pv-speed button { padding: 0 6px; min-width: 0; height: 18px; line-height: 16px; }
+.pv-speed input { width: 46px; height: 18px; padding: 0 4px; text-align: center; }
+.pv-speed .lbl { color: var(--muted); font-size: 11px; cursor: pointer; }
 #previewPane canvas { flex: 1; width: 100%; min-height: 0; display: block; }
 .pane-head { display: flex; justify-content: space-between; padding: 4px 8px; background: var(--panel); border-bottom: 1px solid var(--line); font-weight: 600; }
 .pane-head .muted { font-weight: 400; font-size: 11px; }
@@ -134,6 +140,10 @@ kbd { font: 10.5px var(--mono); background: #2a2a2f; border: 1px solid #3c3c44; 
 @media (max-width: 1100px) { #previewPane { width: 220px; } #side { width: 270px; } }
 @media (max-width: 820px) { #previewPane { display: none; } }
 
+.warnlist { margin: 6px 0 10px 18px; padding: 0; max-height: 50vh; overflow: auto; }
+.warnlist li { margin: 3px 0; color: var(--text); }
+.sdvx-export .row > label { width: 120px; }
+
 </style>
 </head>
 <body>
@@ -146,8 +156,9 @@ kbd { font: 10.5px var(--mono); background: #2a2a2f; border: 1px solid #3c3c44; 
 	<div id="optbar"></div>
 	<main id="main">
 		<aside id="previewPane">
-			<div class="pane-head"><span>Preview</span><span class="muted" title="Approximation of KSM's camera; check final charts in KSM">approx.</span></div>
+			<div class="pane-head"><span>Preview</span><span id="pvSpeed" class="pv-speed"></span></div>
 			<canvas id="preview"></canvas>
+			<div id="pvResize" title="Drag to resize the preview"></div>
 		</aside>
 		<div id="toolbox"></div>
 		<section id="timelineWrap">
@@ -857,7 +868,7 @@ function laserToKshSegments(sections) {
 
 function exportKsh(chartIn, opts = {}) {
 	const warnings = [];
-	const c = opts.v1 ? toKsmV1(chartIn, warnings) : chartIn;
+	const c = opts.usc ? toUsc(chartIn, warnings) : opts.v1 ? toKsmV1(chartIn, warnings) : chartIn;
 	const out = [];
 	const timing = new Timing(c);
 	const m = c.meta;
@@ -980,7 +991,11 @@ function exportKsh(chartIn, opts = {}) {
 		for (let i = 0; i < 2; i++) { const g = secAt[i].get(p); if (g && g[0].wide) out.push('laserrange_' + (i ? 'r' : 'l') + '=2x'); }
 		for (let i = 0; i < 2; i++) { const pt = laserPtAt[i].get(p); if (pt && !isLinear(pt)) out.push('laser_' + (i ? 'r' : 'l') + '_curve=' + fmtNum(pt.a) + ';' + fmtNum(pt.b)); }
 		const st = stopAt.get(p); if (st) out.push('stop=' + Math.round(st[0].l / KSH_LEN));
-		const ss = camAt.scroll_speed.get(p); if (ss) writeGraph('scroll_speed', ss[0], false);
+		const ss = camAt.scroll_speed.get(p);
+		if (ss) { // USC reads scroll_speed as an integer percentage
+			if (opts.usc) writeGraph('scroll_speed', { ...ss[0], v: ss[0].v * 100, vf: ss[0].vf !== undefined ? ss[0].vf * 100 : undefined }, true);
+			else writeGraph('scroll_speed', ss[0], false);
+		}
 		const rd = camAt.rotation_deg.get(p); if (rd) writeGraph('rotation_deg', rd[0], false);
 		for (let i = 0; i < 2; i++) {
 			const key = 'fx-' + (i ? 'r' : 'l');
@@ -1031,23 +1046,69 @@ function exportKsh(chartIn, opts = {}) {
 }
 
 // KSM v1 compatibility: bake curves into linear steps, drop v2-only events
+// Replace curved graph segments by straight steps every `step` ticks
+function bakeGraph(pts, step, roundInt) {
+	const res = [];
+	for (let i = 0; i < pts.length; i++) {
+		const p = pts[i], q = pts[i + 1];
+		res.push({ ...p, a: 0, b: 0 });
+		if (!q || isLinear(p) || typeof q.v !== 'number' || typeof p.v !== 'number') continue;
+		const pv = typeof p.vf === 'number' ? p.vf : p.v;
+		for (let t = p.t + step; t < q.t; t += step) {
+			let v = pv + (q.v - pv) * evalCurve(p.a, p.b, (t - p.t) / (q.t - p.t));
+			v = roundInt ? Math.round(v) : round3(v);
+			res.push({ id: nid(), t, v, a: 0, b: 0 });
+		}
+	}
+	return res;
+}
+// Chart for unnamed sdvx clone (USC): no curves, rotation_deg folded into manual tilt
+// (KSM v2 uses the same sign: rotation_deg 10 == tilt 1); scroll_speed is written as a percentage by exportKsh.
+function toUsc(c, warnings) {
+	const d = toKsmV1({ ...c, cam: { ...c.cam, scroll_speed: [], rotation_deg: [] } }, warnings);
+	d.cam.scroll_speed = bakeGraph(c.cam.scroll_speed, 15, false);
+	const rot = bakeGraph(c.cam.rotation_deg, 15, false);
+	if (rot.some(p => p.v !== 0 || (typeof p.vf === 'number' && p.vf !== 0))) {
+		const tilt = d.tilt;
+		const ticks = [...new Set([...rot.map(p => p.t), ...tilt.map(p => p.t)])].sort((a, b) => a - b);
+		const val = (pts, t, after) => { // linear graph value; after = take the immediate value at t
+			const i = upperBound(pts, t) - 1;
+			if (i < 0) return pts.length ? (typeof pts[0].v === 'number' ? pts[0].v : null) : 0;
+			const p = pts[i];
+			if (p.t === t && !after) { const prev = pts[i - 1]; if (prev && typeof prev.v === 'number' && typeof p.v === 'number') return p.v; return typeof p.v === 'number' ? p.v : null; }
+			const pv = p.vf !== undefined ? p.vf : p.v;
+			if (typeof pv !== 'number') return null;
+			const q = pts[i + 1];
+			if (!q || typeof q.v !== 'number' || p.t === t) return pv;
+			return pv + (q.v - pv) * (t - p.t) / (q.t - p.t);
+		};
+		const modeAt = (t, after) => { // auto-mode string in effect, or null when manual numbers apply
+			const i = upperBound(tilt, after ? t : t - 1) - 1; if (i < 0) return 'normal';
+			const p = tilt[i], v = after || p.t < t ? (p.vf !== undefined ? p.vf : p.v) : p.v;
+			return typeof v === 'string' ? v : null;
+		};
+		const out = []; let replacedAuto = false;
+		for (const t of ticks) {
+			const r0 = val(rot, t, false) || 0, r1 = val(rot, t, true) || 0;
+			const before = val(rot, t - 1, true) || 0, after = val(rot, t + 1, true) || 0;
+			const own = tilt.find(p => p.t === t);
+			if (r0 === 0 && r1 === 0 && before === 0 && after === 0) { if (own) out.push(own); continue; }
+			const m0 = modeAt(t, false), m1 = modeAt(t, true);
+			if ((m0 && r0) || (m1 && r1)) replacedAuto = true;
+			const v0 = round3(r0 / 10 + (m0 ? 0 : (val(tilt, t, false) || 0)));
+			const v1 = r1 === 0 && after === 0 && m1 ? m1 : round3(r1 / 10 + (m1 ? 0 : (val(tilt, t, true) || 0)));
+			const np = { id: nid(), t, v: v0, a: 0, b: 0 };
+			if (v1 !== v0) np.vf = v1;
+			out.push(np);
+		}
+		d.tilt = out;
+		warnings.push({ t: rot[0].t, msg: 'rotation_deg was converted to manual tilt (USC has no rotation_deg).' + (replacedAuto ? ' While the lane is rotated, the automatic laser tilt is off.' : '') });
+	}
+	return d;
+}
 function toKsmV1(c, warnings) {
 	const d = cloneChart(c);
-	const bake = (pts, step, roundInt) => {
-		const res = [];
-		for (let i = 0; i < pts.length; i++) {
-			const p = pts[i], q = pts[i + 1];
-			res.push({ ...p, a: 0, b: 0 });
-			if (!q || isLinear(p) || typeof q.v !== 'number' || typeof p.v !== 'number') continue;
-			const pv = p.vf !== undefined ? p.vf : p.v;
-			for (let t = p.t + step; t < q.t; t += step) {
-				let v = pv + (q.v - pv) * evalCurve(p.a, p.b, (t - p.t) / (q.t - p.t));
-				v = roundInt ? Math.round(v) : round3(v);
-				res.push({ id: nid(), t, v, a: 0, b: 0 });
-			}
-		}
-		return res;
-	};
+	const bake = bakeGraph;
 	let baked = 0;
 	for (const k of ['zoom_top', 'zoom_bottom', 'zoom_side', 'center_split']) { if (d.cam[k].some(p => !isLinear(p))) baked++; d.cam[k] = bake(d.cam[k], 15, true); }
 	if (d.tilt.some(p => !isLinear(p))) baked++;
@@ -1112,13 +1173,400 @@ function validateChart(c) {
 const KSMCore = {
 	RES, MEAS4, LASER_MAX, SLAM_LEN, KSH_LEN, CAM_KEYS, TILT_AUTO, HEADER_KEYS, FX_EFFECTS, LEGACY_FX_CHARS, LASER_FILTERS,
 	SLAM_SOUNDS, FX_CHIP_SOUNDS, BG_PRESETS, LAYER_PRESETS, DIFFICULTIES, CURVE_PRESETS,
-	nid, newChart, cloneChart, Timing, ScrollMap, importKsh, exportKsh, toKsmV1, validateChart, laserToKshSegments,
+	nid, newChart, cloneChart, Timing, ScrollMap, importKsh, exportKsh, toKsmV1, toUsc, bakeGraph, validateChart, laserToKshSegments,
 	lowerBound, upperBound, lastAtOrBefore, findAt, insertSorted, sortByT, charToLaserX, laserXToChar, laserPos, posToLaserX,
 	evalCurve, isLinear, laserValueAt, graphValueAt, sectionEndTick, fmtNum, autoDispBpm, clamp, decodeKshBytes,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = KSMCore;
 else root.KSMCore = KSMCore;
 })(this);
+
+</script>
+<script>
+/* ============================================================================
+ * Audible chart effects: FX hold effects (Retrigger, Gate, Flanger, ...) and the
+ * laser filter (peak / lpf1 / hpf1 / bitc), ported from USC's DSP.cpp,
+ * AudioEffects.cpp and AudioPlayback.cpp (MIT licence).
+ *
+ * The music is played by an AudioWorklet that owns the PCM. It knows the exact
+ * song position of every output sample, so effects line up with the chart to
+ * the sample. The chart is compiled into a small schedule (song seconds) on
+ * the main thread and posted to the worklet whenever it changes.
+ * ========================================================================== */
+const KSMFX = (() => {
+	// --- effect string -> {type, p0, p1}   (USC BeatmapFromKSH ParseFXAndParameters + defaults)
+	const DEFAULT_P = { BitCrusher: 4, Gate: 8, Retrigger: 8, Phaser: 2000, Flanger: 2000, Wobble: 12, SideChain: 8, TapeStop: 50, Echo: 4, PitchShift: 12 };
+	const TYPES = new Set(['Retrigger', 'Gate', 'Flanger', 'Phaser', 'BitCrusher', 'Wobble', 'SideChain', 'Echo', 'TapeStop', 'PitchShift']);
+	function parseDefines(defs) { // '#define_fx name type=Retrigger;waveLength=1/8;...'
+		const out = {};
+		for (const line of defs || []) {
+			const m = /^#define_(fx|filter)\s+(\S+)\s+(.*)$/.exec(line.trim());
+			if (!m) continue;
+			const kv = {};
+			for (const part of m[3].split(';')) { const i = part.indexOf('='); if (i > 0) kv[part.slice(0, i).trim()] = part.slice(i + 1).trim(); }
+			out[m[1] + ':' + m[2]] = kv;
+		}
+		return out;
+	}
+	const frac = (s) => { if (!s) return NaN; const m = /^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/.exec(s); return m ? +m[1] / +m[2] : parseFloat(s); };
+	function parseEffect(str, defines) {
+		if (!str) return null;
+		const parts = String(str).split(';').map(s => s.trim());
+		let name = parts[0], p0 = parts[1] !== undefined && parts[1] !== '' ? parseInt(parts[1], 10) : NaN, p1 = parts[2] !== undefined ? parseInt(parts[2], 10) : NaN;
+		if (!TYPES.has(name)) {
+			const d = defines && defines['fx:' + name];
+			if (!d || !TYPES.has(d.type)) return null;
+			const wl = frac(d.waveLength);
+			if (!Number.isFinite(p0) && wl > 0) p0 = Math.round(1 / wl);
+			if (!Number.isFinite(p1) && d.feedbackLevel) p1 = Math.round(parseFloat(d.feedbackLevel) * (d.feedbackLevel.includes('%') ? 1 : 100));
+			name = d.type;
+		}
+		if (!Number.isFinite(p0)) p0 = DEFAULT_P[name] ?? 0;
+		if (!Number.isFinite(p1)) p1 = name === 'Echo' ? 60 : 0;
+		return { type: name, p0, p1 };
+	}
+	function filterKind(v, defines) {
+		v = String(v || 'peak').trim();
+		if (v === 'peak' || v === 'lpf1' || v === 'hpf1') return v;
+		if (v === 'bitc' || v === 'fx;bitc') return 'bitc';
+		const d = defines && defines['filter:' + v];
+		if (d && d.type) return ({ PeakingFilter: 'peak', LowPassFilter: 'lpf1', HighPassFilter: 'hpf1', BitCrusher: 'bitc' })[d.type] || 'peak';
+		return 'peak';
+	}
+
+	// --- chart -> schedule (all times in song seconds)
+	const ENV_RATE = 240; // laser filter envelope samples per second
+	function buildSchedule(ed) {
+		const ch = ed.chart, tm = ed.timing, S = (t) => ed.songTimeOf(t);
+		const defines = parseDefines(ch.defs);
+		const holds = [[], []];
+		ch.fx.forEach((lane, li) => lane.forEach(n => {
+			if (!(n.l > 0) || !n.fx) return;
+			const e = parseEffect(n.fx, defines); if (!e) return;
+			const bpm = tm.bpmAt(n.t), bp = K.lastAtOrBefore(ch.bpm, n.t);
+			holds[li].push({ s: S(n.t), e: S(n.t + n.l), type: e.type, p0: e.p0, p1: e.p1, whole: 240 / bpm, tp: S(bp ? (ch.bpm.indexOf(bp) === 0 ? 0 : bp.t) : 0) });
+		}));
+		const steps = (arr, init, conv) => { const out = [{ s: -1e9, v: init }]; for (const p of arr) out.push({ s: S(p.t), v: conv(p.v) }); return out; };
+		const filters = steps(ch.filterType, filterKind(ch.meta.filtertype, defines), v => filterKind(v, defines));
+		const pg = (v) => K.clamp((parseFloat(v) || 0) / 100, 0, 1);
+		const mixes = steps(ch.pfilterGain, pg(ch.meta.pfiltergain === undefined || ch.meta.pfiltergain === '' ? 50 : ch.meta.pfiltergain), pg);
+		// laser filter input: max over lanes of the knob position (L: 0 at left, R: 0 at right), USC Scoring::m_GetLaserOutputRaw
+		let end = 0;
+		for (const lane of ch.laser) if (lane.length) end = Math.max(end, K.sectionEndTick(lane[lane.length - 1]));
+		const t0 = S(0), t1 = S(end) + 0.5;
+		const n = Math.max(1, Math.ceil((t1 - t0) * ENV_RATE) + 1);
+		const env = new Float32Array(n), act = new Uint8Array(n);
+		if (end > 0) {
+			const ptr = [0, 0];
+			let out = 0, src = 0, tgt = 0, since = 1;
+			for (let k = 0; k < n; k++) {
+				const tick = ed.tickOfSong(t0 + k / ENV_RATE);
+				let raw = 0, any = false;
+				for (let li = 0; li < 2; li++) {
+					const arr = ch.laser[li];
+					while (ptr[li] < arr.length && K.sectionEndTick(arr[ptr[li]]) < tick) ptr[li]++;
+					const s = arr[ptr[li]]; if (!s || tick < s.t) continue;
+					const lp = s.pts[s.pts.length - 1];
+					if (tick >= s.t + lp.ry) continue; // past the last point (or in a final slam)
+					const v = K.laserValueAt(s, Math.floor(tick)); if (v === null) continue;
+					any = true;
+					let p = v / 50; if (li === 1) p = 1 - p;
+					raw = Math.max(raw, p);
+				}
+				// USC smooths changes over 0.1 s
+				since += 1 / ENV_RATE;
+				if (raw !== tgt) { src = src + (tgt - src) * Math.min(1, since / 0.1); tgt = raw; since = 0; }
+				out = src + (tgt - src) * Math.min(1, since / 0.1);
+				env[k] = out; act[k] = any ? 1 : 0;
+			}
+		}
+		return { holds, filters, mixes, env: { t0, rate: ENV_RATE, v: env, a: act } };
+	}
+
+	// --- AudioWorklet (runs on the audio thread; serialised with toString)
+	function WORKLET() {
+		const easeInExpo = (t) => { const i = 1 - t; return 3 * i * i * t * 0.05 + 3 * i * t * t * 0.035 + t * t * t; };
+		const easeOutCubic = (t) => { const i = 1 - t; return 3 * i * i * t * 0.61 + 3 * i * t * t * 1 + t * t * t; };
+		class BQF {
+			constructor() { this.b0 = 1; this.b1 = 0; this.b2 = 0; this.a1 = 0; this.a2 = 0; this.z = [0, 0, 0, 0]; }
+			_set(b0, b1, b2, a0, a1, a2) { this.b0 = b0 / a0; this.b1 = b1 / a0; this.b2 = b2 / a0; this.a1 = a1 / a0; this.a2 = a2 / a0; }
+			lowPass(q, f, sr) { q = Math.max(q, 0.01); const w = 2 * Math.PI * f / sr, c = Math.cos(w), al = Math.sin(w) / (2 * q); this._set((1 - c) / 2, 1 - c, (1 - c) / 2, 1 + al, -2 * c, 1 - al); }
+			highPass(q, f, sr) { q = Math.max(q, 0.01); const w = 2 * Math.PI * f / sr, c = Math.cos(w), al = Math.sin(w) / (2 * q); this._set((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al); }
+			allPass(q, f, sr) { q = Math.max(q, 0.01); const w = 2 * Math.PI * f / sr, c = Math.cos(w), al = Math.sin(w) / (2 * q); this._set(1 - al, -2 * c, 1 + al, 1 + al, -2 * c, 1 - al); }
+			peaking(q, f, g, sr) { q = Math.max(q, 0.01); const w = 2 * Math.PI * f / sr, c = Math.cos(w), al = Math.sin(w) / (2 * q), A = Math.pow(10, g / 40); this._set(1 + al * A, -2 * c, 1 - al * A, 1 + al / A, -2 * c, 1 - al / A); }
+			highShelf(q, f, g, sr) {
+				q = Math.max(q, 0.01); const w = 2 * Math.PI * f / sr, c = Math.cos(w), al = Math.sin(w) / (2 * q), A = Math.pow(10, g / 40), s = 2 * Math.sqrt(A) * al;
+				this._set(A * ((A + 1) + (A - 1) * c + s), -2 * A * ((A - 1) + (A + 1) * c), A * ((A + 1) + (A - 1) * c - s), (A + 1) - (A - 1) * c + s, 2 * ((A - 1) - (A + 1) * c), (A + 1) - (A - 1) * c - s);
+			}
+			copyCoef(o) { this.b0 = o.b0; this.b1 = o.b1; this.b2 = o.b2; this.a1 = o.a1; this.a2 = o.a2; }
+			run(x) { const z = this.z, y = this.b0 * x + this.b1 * z[0] + this.b2 * z[1] - this.a1 * z[2] - this.a2 * z[3]; z[1] = z[0]; z[0] = x; z[3] = z[2]; z[2] = y; return y; }
+		}
+		// Every DSP: process(L, R, i0, i1, ctx) on samples [i0, i1) of the block; ctx = {sr, rate, pos (song s per sample), pcm}
+		const DSPS = {
+			BitCrusher(o) { // period in 44.1k samples
+				const st = { dur: 0, hl: 0, hr: 0, period: 0, mix: o.mix ?? 1 };
+				st.set = (p, sr) => { st.period = Math.floor(sr / 44100 * p * 65536); };
+				st.set(o.p0, o.sr);
+				st.process = (L, R, a, b) => { for (let i = a; i < b; i++) { st.dur += 65536; if (st.dur > st.period) { st.hl = L[i]; st.hr = R[i]; st.dur -= st.period; } L[i] = st.hl * st.mix + L[i] * (1 - st.mix); R[i] = st.hr * st.mix + R[i] * (1 - st.mix); } };
+				return st;
+			},
+			Gate(o) {
+				const len = Math.max(2, Math.floor(o.whole / Math.max(1, o.p0) * o.sr / o.rate)), gating = 0.5, half = Math.floor(len * gating);
+				const fd = Math.min(0.05, gating * 0.5), fin = Math.max(1, Math.floor(half * fd)), fout = Math.floor(half * (1 - fd));
+				const st = { cur: Math.floor(o.elapsed * o.sr / o.rate) % len, mix: 0.9, low: 0.1 };
+				st.process = (L, R, a, b) => {
+					for (let i = a; i < b; i++) {
+						let c = 1;
+						if (st.cur < half) { if (st.cur > fout) c = 1 - (st.cur - fout) / fin; }
+						else { const t = st.cur - half; c = t > fout ? (t - fout) / fin : 0; }
+						c = c * (1 - st.low) + st.low; c = c * st.mix + (1 - st.mix);
+						L[i] *= c; R[i] *= c;
+						st.cur = (st.cur + 1) % len;
+					}
+				};
+				return st;
+			},
+			TapeStop(o) {
+				const len = Math.max(1, Math.floor(16 / Math.max(1, o.p0) * o.sr / o.rate));
+				const bl = [], br = [];
+				const st = { cur: 0, idx: 0, mix: 1 };
+				st.process = (L, R, a, b) => {
+					for (let i = a; i < b; i++) {
+						const r = 1 - st.cur / len;
+						if (r <= 0) { L[i] = 0; R[i] = 0; continue; }
+						bl.push(L[i]); br.push(R[i]);
+						const j = Math.floor(st.idx);
+						L[i] = bl[j] * st.mix + L[i] * (1 - st.mix); R[i] = br[j] * st.mix + R[i] * (1 - st.mix);
+						st.idx += r; st.cur++;
+					}
+				};
+				return st;
+			},
+			Retrigger(o) {
+				const len = Math.max(1, Math.floor(o.whole / Math.max(1, o.p0) * o.sr / o.rate)), gateLen = Math.floor(len * 0.7);
+				const reset = o.whole * 0.5, base = o.tp;
+				const st = { cur: Math.floor(o.elapsed * o.sr / o.rate) % len, mix: 1, start: o.start };
+				st.process = (L, R, a, b, ctx) => {
+					const pcm = ctx.pcm; if (!pcm) return;
+					for (let i = a; i < b; i++) {
+						const now = ctx.pos[i];
+						const off = reset > 0 ? Math.floor((now - base) / reset + 1e-9) * reset : st.start - base;
+						const p = (base + off + st.cur * ctx.rate / ctx.sr) * pcm.sr;
+						const g = st.cur > gateLen ? 0 : 1;
+						const k = Math.floor(p), f = p - k;
+						let sl = 0, sr = 0;
+						if (k >= 0 && k + 1 < pcm.n) { sl = pcm.l[k] + (pcm.l[k + 1] - pcm.l[k]) * f; sr = pcm.r[k] + (pcm.r[k + 1] - pcm.r[k]) * f; }
+						L[i] = g * sl * st.mix + L[i] * (1 - st.mix); R[i] = g * sr * st.mix + R[i] * (1 - st.mix);
+						st.cur = (st.cur + 1) % len;
+					}
+				};
+				return st;
+			},
+			Echo(o) {
+				const len = Math.max(1, Math.floor(o.whole / Math.max(1, o.p0) * o.sr / o.rate));
+				const dl = new Float32Array(len), dr = new Float32Array(len);
+				const st = { off: 0, loops: 0, fb: o.p1 / 100, mix: 1 };
+				st.process = (L, R, a, b) => {
+					for (let i = a; i < b; i++) {
+						if (st.loops > 0) { L[i] = dl[st.off] * st.mix; R[i] = dr[st.off] * st.mix; }
+						dl[st.off] = L[i] * st.fb; dr[st.off] = R[i] * st.fb;
+						if (++st.off >= len) { st.off = 0; st.loops++; }
+					}
+				};
+				return st;
+			},
+			Wobble(o) {
+				const len = Math.max(1, Math.floor(o.whole / Math.max(1, o.p0) * o.sr / o.rate));
+				const f = [new BQF(), new BQF()];
+				const st = { cur: Math.floor(o.elapsed * o.sr / o.rate) % len, mix: 0.8, q: 1.414, fmin: 500, fmax: 20000 };
+				st.process = (L, R, a, b, ctx) => {
+					for (let i = a; i < b; i++) {
+						const x = easeInExpo(Math.abs(2 * st.cur / len - 1));
+						f[0].lowPass(st.q, st.fmin + (st.fmax - st.fmin) * x, ctx.sr); f[1].copyCoef(f[0]);
+						L[i] = f[0].run(L[i]) * st.mix + L[i] * (1 - st.mix); R[i] = f[1].run(R[i]) * st.mix + R[i] * (1 - st.mix);
+						st.cur = (st.cur + 1) % len;
+					}
+				};
+				return st;
+			},
+			Phaser(o) {
+				const len = Math.max(1, Math.floor(o.whole * 0.5 * o.sr / o.rate)), stages = 6;
+				const ap = [[], []]; for (let j = 0; j < stages; j++) { ap[0].push(new BQF()); ap[1].push(new BQF()); }
+				const hs = [new BQF(), new BQF()];
+				const st = { cur: Math.floor(o.elapsed * o.sr / o.rate) % len, mix: 0.5, fmin: 1500, fmax: 20000, q: 0.707, fb: 0.35, width: 0.75, za: [0, 0] };
+				hs[0].highShelf(1.5, Math.sqrt(st.fmin * st.fmax), -8, o.sr); hs[1].copyCoef(hs[0]);
+				const coef = new BQF();
+				st.process = (L, R, a, b, ctx) => {
+					for (let i = a; i < b; i++) {
+						const fr = [Math.abs(2 * (st.cur / len) - 1), Math.abs(2 * ((st.cur / len + st.width) % 1) - 1)];
+						for (let c = 0; c < 2; c++) {
+							const X = c ? R : L, x = X[i];
+							coef.allPass(st.q, Math.pow(st.fmin, fr[c]) * Math.pow(st.fmax, 1 - fr[c]), ctx.sr);
+							let y = st.fb * st.za[c] + x;
+							for (let j = 0; j < stages; j++) { ap[c][j].copyCoef(coef); y = ap[c][j].run(y); }
+							st.za[c] = y;
+							y = (st.mix / 2) * y + (1 - st.mix / 2) * x;
+							X[i] = st.mix * hs[c].run(y) + (1 - st.mix) * y;
+						}
+						st.cur = (st.cur + 1) % len;
+					}
+				};
+				return st;
+			},
+			Flanger(o) {
+				const len = Math.max(1, Math.floor(o.whole * 2 * o.sr / o.rate));
+				const m = o.sr / 44100, min = Math.floor(30 * m), max = Math.floor((30 + 45) * m), depth = max - min, bl = (max + 1);
+				const dl = new Float32Array(bl), dr = new Float32Array(bl);
+				const st = { t: 0, off: 0, fb: 0.6, width: 0, vol: 0.75, mix: 0.8 };
+				const cl = (v) => v < -1 ? -1 : v > 1 ? 1 : v;
+				st.process = (L, R, a, b) => {
+					const g = st.mix * st.vol + (1 - st.mix);
+					for (let i = a; i < b; i++) {
+						let f = (st.t / (len * 2)) % 1; f = Math.abs(f * 2 - 1);
+						const dL = Math.floor(max - depth * f); let dR = dL + Math.floor(st.width * depth); if (dR > max) dR = max - (dR - max);
+						const pl = ((st.off - dL) % bl + bl) % bl, pr = ((st.off - dR) % bl + bl) % bl;
+						const xl = L[i], xr = R[i];
+						dl[st.off] = cl((st.fb * dl[pl] + xl) * g); dr[st.off] = cl((st.fb * dr[pr] + xr) * g);
+						L[i] = cl((st.mix * dl[pl] + xl) * g); R[i] = cl((st.mix * dr[pr] + xr) * g);
+						if (++st.off >= bl) st.off = 0;
+						st.t++;
+					}
+				};
+				return st;
+			},
+			SideChain(o) {
+				const k = o.sr / o.rate, len = Math.floor(o.whole / 4 * k), at = Math.floor(0.010 * k), ht = Math.floor(0.050 * k), rt = Math.floor(o.whole / 16 * k);
+				const st = { t: Math.floor(o.elapsed * k) % (len + 1), mix: 1, ratio: 5 };
+				st.process = (L, R, a, b) => {
+					if (!len) return;
+					for (let i = a; i < b; i++) {
+						let v;
+						if (st.t < at) v = 1 - st.t / at; else if (st.t < at + ht) v = 0; else if (st.t < at + ht + rt) v = (st.t - at - ht) / rt; else v = 1;
+						const g = st.mix * ((1 / st.ratio) + (1 - 1 / st.ratio) * v) + (1 - st.mix);
+						L[i] *= g; R[i] *= g;
+						if (++st.t > len) st.t = 0;
+					}
+				};
+				return st;
+			},
+			PitchShift(o) { // two-tap delay line pitch shifter (USC uses SoundTouch; this is a light stand-in)
+				const W = Math.floor(0.05 * o.sr), N = W * 2 + 4;
+				const dl = new Float32Array(N), dr = new Float32Array(N);
+				const st = { w: 0, ph: 0, mix: 1, ratio: Math.pow(2, Math.max(-48, Math.min(48, o.p0)) / 12) };
+				const rd = (d, p) => { const k = Math.floor(p), f = p - k, a = ((k % N) + N) % N, b = (a + 1) % N; return d[a] + (d[b] - d[a]) * f; };
+				st.process = (L, R, a, b) => {
+					const step = (1 - st.ratio) / W;
+					for (let i = a; i < b; i++) {
+						dl[st.w] = L[i]; dr[st.w] = R[i];
+						st.ph = (st.ph + step) % 1; if (st.ph < 0) st.ph += 1;
+						const p2 = (st.ph + 0.5) % 1, g1 = Math.sin(Math.PI * st.ph), g2 = Math.sin(Math.PI * p2);
+						const r1 = st.w - 1 - st.ph * W, r2 = st.w - 1 - p2 * W;
+						L[i] = (rd(dl, r1) * g1 + rd(dl, r2) * g2) * st.mix + L[i] * (1 - st.mix);
+						R[i] = (rd(dr, r1) * g1 + rd(dr, r2) * g2) * st.mix + R[i] * (1 - st.mix);
+						st.w = (st.w + 1) % N;
+					}
+				};
+				return st;
+			},
+		};
+		const findStep = (arr, s) => { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].s <= s) lo = m + 1; else hi = m; } return arr[Math.max(0, lo - 1)].v; };
+
+		class KsmFx extends AudioWorkletProcessor {
+			constructor(options) {
+				super();
+				this.pcm = null; this.play = null; this.sched = null; this.fxOn = true;
+				const init = options && options.processorOptions; // used for offline rendering / tests
+				if (init) { this.pcm = init.pcm || null; this.sched = init.sched || null; this.play = init.play || null; }
+				this.lane = [null, null]; this.laser = null;
+				this.L = new Float32Array(128); this.R = new Float32Array(128); this.pos = new Float64Array(128);
+				this.port.onmessage = (e) => {
+					const m = e.data;
+					if (m.cmd === 'pcm') this.pcm = m.pcm;
+					else if (m.cmd === 'play') { this.play = m; this.lane = [null, null]; this.laser = null; }
+					else if (m.cmd === 'stop') { this.play = null; this.lane = [null, null]; this.laser = null; }
+					else if (m.cmd === 'sched') { this.sched = m.sched; this.lane = [null, null]; this.laser = null; }
+					else if (m.cmd === 'fx') this.fxOn = m.on;
+				};
+			}
+			process(inputs, outputs) {
+				const out = outputs[0], oL = out[0], oR = out[1] || out[0], n = oL.length;
+				const P = this.play, pcm = this.pcm;
+				if (!P || !pcm) { oL.fill(0); if (oR !== oL) oR.fill(0); return true; }
+				const sr = sampleRate, L = this.L, R = this.R, pos = this.pos;
+				let any = false;
+				for (let i = 0; i < n; i++) {
+					const fr = currentFrame + i - P.frame;
+					if (fr < 0) { L[i] = 0; R[i] = 0; pos[i] = -1e9; continue; }
+					const s = P.song + fr * P.rate / sr; pos[i] = s;
+					const p = s * pcm.sr, k = Math.floor(p), f = p - k;
+					if (k >= 0 && k + 1 < pcm.n) { L[i] = pcm.l[k] + (pcm.l[k + 1] - pcm.l[k]) * f; R[i] = pcm.r[k] + (pcm.r[k + 1] - pcm.r[k]) * f; any = true; }
+					else { L[i] = 0; R[i] = 0; }
+				}
+				const S = this.sched;
+				if (S && this.fxOn && pos[n - 1] > -1e8) {
+					const ctx = { sr, rate: P.rate, pos, pcm };
+					const s0 = pos[0] > -1e8 ? pos[0] : pos[n - 1];
+					// FX hold effects
+					for (let li = 0; li < 2; li++) {
+						const hs = S.holds[li]; let lo = 0, hi = hs.length;
+						while (lo < hi) { const m = (lo + hi) >> 1; if (hs[m].s <= s0) lo = m + 1; else hi = m; }
+						const h = hs[lo - 1] && s0 < hs[lo - 1].e ? hs[lo - 1] : (hs[lo] && hs[lo].s < pos[n - 1] ? hs[lo] : null);
+						if (!h) { this.lane[li] = null; continue; }
+						if (!this.lane[li] || this.lane[li].h !== h) {
+							const mk = DSPS[h.type];
+							this.lane[li] = mk ? { h, d: mk({ sr, rate: P.rate, p0: h.p0, p1: h.p1, whole: h.whole, tp: h.tp, start: h.s, elapsed: Math.max(0, s0 - h.s) }) } : { h, d: null };
+						}
+						const d = this.lane[li].d; if (!d) continue;
+						let a = 0; while (a < n && pos[a] < h.s) a++;
+						let b = a; while (b < n && pos[b] < h.e) b++;
+						if (b > a) d.process(L, R, a, b, ctx);
+					}
+					// laser filter
+					const E = S.env, x = (s0 - E.t0) * E.rate, k = Math.floor(x);
+					let input = 0, active = false;
+					if (k >= 0 && k + 1 < E.v.length) { active = E.a[k] === 1; input = E.v[k] + (E.v[k + 1] - E.v[k]) * (x - k); }
+					const kind = findStep(S.filters, s0), mix0 = findStep(S.mixes, s0);
+					const skipZero = kind !== 'none';
+					if (active && !(input <= 0 && skipZero)) {
+						if (!this.laser || this.laser.kind !== kind) {
+							this.laser = { kind, f: [new BQF(), new BQF()], bc: kind === 'bitc' ? DSPS.BitCrusher({ sr, p0: 0, mix: 1 }) : null };
+						}
+						const Ls = this.laser;
+						let mix = mix0; if (input < 0.1) mix *= input / 0.1;
+						if (kind === 'bitc') { Ls.bc.set(Math.floor(45 * input), sr); Ls.bc.process(L, R, 0, n); }
+						else {
+							if (kind === 'lpf1') Ls.f[0].lowPass((7 + 3 * input) * mix + 0.1, 10000 + (700 - 10000) * easeOutCubic(input), sr);
+							else if (kind === 'hpf1') Ls.f[0].highPass((10 - 5 * input) * mix + 0.1, 80 + (2000 - 80) * easeInExpo(input), sr);
+							else { if (input > 0.8) mix *= 1 - (input - 0.8) / 0.2; Ls.f[0].peaking(1 - 0.2 * input, 80 + (8000 - 80) * easeInExpo(input), 20 * mix, sr); }
+							Ls.f[1].copyCoef(Ls.f[0]);
+							for (let i = 0; i < n; i++) { L[i] = Ls.f[0].run(L[i]); R[i] = Ls.f[1].run(R[i]); }
+						}
+					} else this.laser = null;
+				}
+				// USC-style limiter: effects such as resonant laser filters can push past full scale
+				const lim = this.lim || (this.lim = { g: 1, rel: 0.1 * sr, t: 1e9, peak: 1 });
+				for (let i = 0; i < n; i++) {
+					let g = 1;
+					if (lim.t < lim.rel) { const u = 1 - lim.t / lim.rel; g = (1 / lim.peak) * u + (1 - u); }
+					const pk = Math.max(Math.abs(L[i]), Math.abs(R[i]));
+					oL[i] = L[i] * g; if (oR !== oL) oR[i] = R[i] * g;
+					if (pk > 1 / g) { lim.peak = pk; lim.t = 0; } else lim.t++;
+				}
+				return true;
+			}
+		}
+		registerProcessor('ksm-fx', KsmFx);
+	}
+	const WORKLET_SRC = '(' + WORKLET.toString() + ')();';
+	// Load the worklet module: a data: URL works from file:// pages (blob: URLs do not), blob: as a fallback
+	async function addWorklet(ctx) {
+		const data = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(WORKLET_SRC);
+		try { await ctx.audioWorklet.addModule(data); }
+		catch (e) { await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'text/javascript' }))); }
+	}
+	return { parseEffect, parseDefines, filterKind, buildSchedule, WORKLET_SRC, addWorklet };
+})();
+if (typeof module !== 'undefined' && module.exports) module.exports = KSMFX;
 
 </script>
 <script>
@@ -1136,7 +1584,7 @@ class AudioEngine {
 		this.buffer = null; this.fileName = '';
 		this.src = null; this.playing = false;
 		this.rate = 1;
-		this.vol = { music: 0.8, hit: 0.55, metro: 0.0 };
+		this.vol = { music: 0.8, hit: 0.55, game: 0.7, metro: 0.0 };
 		this.peaks = null;               // waveform mip levels [{bucket(s), data: Float32Array}]
 		this.scheduled = [];
 		this.t0Ctx = 0; this.t0Song = 0;
@@ -1149,9 +1597,11 @@ class AudioEngine {
 			this.ctx = new AC({ latencyHint: 'interactive' });
 			this.musicGain = this.ctx.createGain(); this.musicGain.connect(this.ctx.destination);
 			this.hitGain = this.ctx.createGain(); this.hitGain.connect(this.ctx.destination);
+			this.gameGain = this.ctx.createGain(); this.gameGain.connect(this.ctx.destination);
 			this.metroGain = this.ctx.createGain(); this.metroGain.connect(this.ctx.destination);
 			this.applyVolumes();
 			this.sounds = this._makeSounds();
+			this._initWorklet();
 		}
 		if (this.ctx.state === 'suspended') this.ctx.resume();
 		return this.ctx;
@@ -1160,15 +1610,42 @@ class AudioEngine {
 		if (!this.ctx) return;
 		this.musicGain.gain.value = this.vol.music;
 		this.hitGain.gain.value = this.vol.hit;
+		this.gameGain.gain.value = this.vol.game ?? 0.7;
 		this.metroGain.gain.value = this.vol.metro;
 	}
 	get duration() { return this.buffer ? this.buffer.duration : 0; }
+	// The music runs through an AudioWorklet that also renders FX hold / laser effects (see fx.js).
+	// Falls back to a plain AudioBufferSourceNode if worklets are unavailable.
+	_initWorklet() {
+		const ctx = this.ctx;
+		this.fxNode = null; this.pcmSent = false;
+		if (!ctx.audioWorklet || typeof KSMFX === 'undefined') return;
+		this.workletReady = KSMFX.addWorklet(ctx).then(() => {
+			this.fxNode = new AudioWorkletNode(ctx, 'ksm-fx', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
+			this.fxNode.connect(this.musicGain);
+			this.fxNode.port.postMessage({ cmd: 'fx', on: this.fxEnabled !== false });
+			if (this.buffer) this._sendPcm();
+			if (this.pendingSched) this.fxNode.port.postMessage({ cmd: 'sched', sched: this.pendingSched });
+		}).catch((e) => { console.warn('FX worklet unavailable, effects disabled', e); this.fxNode = null; });
+	}
+	_sendPcm() {
+		const b = this.buffer; if (!this.fxNode || !b) return;
+		const l = b.getChannelData(0).slice(), r = (b.numberOfChannels > 1 ? b.getChannelData(1) : b.getChannelData(0)).slice();
+		this.fxNode.port.postMessage({ cmd: 'pcm', pcm: { l, r, n: b.length, sr: b.sampleRate } }, [l.buffer, r.buffer]);
+		this.pcmSent = true;
+	}
+	get fxReady() { return !!(this.fxNode && this.pcmSent); }
+	setSchedule(sched) { this.pendingSched = sched; if (this.fxNode) this.fxNode.port.postMessage({ cmd: 'sched', sched }); }
+	setFxEnabled(on) { this.fxEnabled = on; if (this.fxNode) this.fxNode.port.postMessage({ cmd: 'fx', on }); }
 
 	async load(arrayBuffer, name) {
 		const ctx = this.ensure();
 		const buf = await ctx.decodeAudioData(arrayBuffer.slice(0));
+		this.srcBytes = arrayBuffer; // original file, re-decoded at 44.1 kHz for the SDVX export
 		this.buffer = buf; this.fileName = name || '';
+		this.pcmSent = false;
 		this._buildPeaks();
+		if (this.fxNode) this._sendPcm();
 		return buf;
 	}
 
@@ -1211,7 +1688,10 @@ class AudioEngine {
 		const when = ctx.currentTime + 0.05;
 		this.t0Ctx = when; this.t0Song = songTime;
 		this.offEMA = null; this.lastSong = -Infinity;
-		if (this.buffer && songTime < this.buffer.duration) {
+		if (this.buffer && songTime < this.buffer.duration && this.fxReady) {
+			this.fxNode.port.postMessage({ cmd: 'play', frame: Math.round(when * ctx.sampleRate), song: songTime, rate: this.rate });
+			this.workletPlaying = true;
+		} else if (this.buffer && songTime < this.buffer.duration) {
 			const src = ctx.createBufferSource();
 			src.buffer = this.buffer;
 			src.playbackRate.value = this.rate;
@@ -1224,6 +1704,7 @@ class AudioEngine {
 	}
 	stop() {
 		if (this.src) { try { this.src.stop(); } catch (e) { } this.src.disconnect(); this.src = null; }
+		if (this.workletPlaying && this.fxNode) { this.fxNode.port.postMessage({ cmd: 'stop' }); this.workletPlaying = false; }
 		for (const s of this.scheduled) { try { s.stop(); } catch (e) { } }
 		this.scheduled = [];
 		this.playing = false;
@@ -1252,15 +1733,15 @@ class AudioEngine {
 	}
 	// Context time at which a given song time will be heard
 	ctxTimeFor(songTime) { return this.t0Ctx + (songTime - this.t0Song) / this.rate; }
-	schedule(kind, songTime, gain) {
+	schedule(kind, songTime, gain, bus) {
 		const ctx = this.ctx; if (!ctx || !this.playing) return;
 		const when = this.ctxTimeFor(songTime);
 		if (when < ctx.currentTime - 0.002) return;
 		const s = ctx.createBufferSource();
-		s.buffer = this.sounds[kind];
+		s.buffer = this.sounds[kind] || this.sounds[kind.startsWith('slam') ? 'slam_normal' : 'fx'];
 		let node = s;
 		if (gain !== undefined && gain !== 1) { const g = ctx.createGain(); g.gain.value = gain; s.connect(g); node = g; }
-		node.connect(kind === 'metro' || kind === 'metroHi' ? this.metroGain : this.hitGain);
+		node.connect(kind === 'metro' || kind === 'metroHi' ? this.metroGain : bus === 'game' ? this.gameGain : this.hitGain);
 		s.start(Math.max(when, ctx.currentTime));
 		s.onended = () => { const i = this.scheduled.indexOf(s); if (i >= 0) this.scheduled.splice(i, 1); };
 		this.scheduled.push(s);
@@ -1285,8 +1766,17 @@ class AudioEngine {
 			bt: mk(0.06, (t, r) => { const e = Math.exp(-t * 70); return (r() * 0.55 + Math.sin(2 * Math.PI * 2400 * t) * 0.45) * e * 0.9; }),
 			// lower, fuller clap for FX
 			fx: mk(0.09, (t, r) => { const e = Math.exp(-t * 45); return (r() * 0.6 + Math.sin(2 * Math.PI * 900 * t) * 0.5) * e * 0.9; }),
-			// swoosh for laser slams
-			slam: mk(0.16, (t, r) => { const e = Math.exp(-t * 22) * Math.min(1, t * 400); return r() * e * 0.8 + Math.sin(2 * Math.PI * (500 - t * 1800) * t) * e * 0.4; }),
+			// laser slams (chokkakuse: normal / up / down / swing)
+			slam_normal: mk(0.16, (t, r) => { const e = Math.exp(-t * 22) * Math.min(1, t * 400); return r() * e * 0.8 + Math.sin(2 * Math.PI * (500 - t * 1800) * t) * e * 0.4; }),
+			slam_up: mk(0.18, (t, r) => { const e = Math.exp(-t * 18) * Math.min(1, t * 400); return r() * e * 0.45 + Math.sin(2 * Math.PI * (300 + t * 2600) * t) * e * 0.6; }),
+			slam_down: mk(0.2, (t, r) => { const e = Math.exp(-t * 16) * Math.min(1, t * 400); return r() * e * 0.45 + Math.sin(2 * Math.PI * (900 - t * 2200) * t) * e * 0.6; }),
+			slam_swing: mk(0.3, (t, r) => { const e = Math.sin(Math.PI * Math.min(1, t / 0.3)) * Math.exp(-t * 6); return r() * e * 0.7; }),
+			// FX chip key sounds (fx-l_se / fx-r_se)
+			se_clap: mk(0.22, (t, r) => { const b = (k) => Math.max(0, 1 - Math.abs(t - k) * 200); const e = Math.exp(-t * 18) + b(0.008) + b(0.016); return r() * Math.min(1.2, e) * 0.7; }),
+			se_clap_punchy: mk(0.18, (t, r) => { const e = Math.exp(-t * 28); return r() * e * 0.8 + Math.sin(2 * Math.PI * 180 * t) * Math.exp(-t * 40) * 0.5; }),
+			se_clap_impact: mk(0.3, (t, r) => { const e = Math.exp(-t * 12); return r() * e * 0.75 + Math.sin(2 * Math.PI * (120 - t * 100) * t) * Math.exp(-t * 15) * 0.7; }),
+			se_snare: mk(0.25, (t, r) => { const e = Math.exp(-t * 16); return r() * e * 0.6 + Math.sin(2 * Math.PI * 220 * t) * Math.exp(-t * 30) * 0.5; }),
+			se_snare_lo: mk(0.28, (t, r) => { const e = Math.exp(-t * 13); return r() * e * 0.5 + Math.sin(2 * Math.PI * 150 * t) * Math.exp(-t * 25) * 0.6; }),
 			metro: mk(0.04, (t) => Math.sin(2 * Math.PI * 1500 * t) * Math.exp(-t * 90) * 0.8),
 			metroHi: mk(0.05, (t) => Math.sin(2 * Math.PI * 2300 * t) * Math.exp(-t * 80) * 0.9),
 		};
@@ -1339,7 +1829,7 @@ class TimelineView {
 		this.laneW = S.laneW;
 		this.trackL = this.waveR + 10;
 		this.trackR = this.trackL + this.laneW * 6;
-		this.timingL = this.trackR + 10; this.timingR = this.timingL + 84;
+		this.timingL = this.trackR + 10; this.timingR = this.timingL + 104;
 		const vis = ALL_COLS.filter(k => S.cols[k]);
 		const avail = this.w - this.timingR - 6;
 		const cw = vis.length ? Math.max(46, Math.min(84, Math.floor(avail / vis.length))) : 0;
@@ -1667,27 +2157,33 @@ class TimelineView {
 		const x0 = this.timingL, x1 = this.timingR;
 		c.save(); c.beginPath(); c.rect(x0, this.HEAD, x1 - x0, this.h); c.clip();
 		c.textBaseline = 'bottom';
+		this.timingHits = []; // clickable label boxes (editor hit testing / box select uses these)
 		const stack = new Map(); // small labels at the same tick stack upwards
-		const label = (t, txt, color, row) => {
+		const label = (t, txt, color, row, hit) => {
 			if (t < t0 - 200 || t > t1 + 200) return;
 			const y = Math.round(this.yOf(t)) + 0.5;
-			c.strokeStyle = color; c.beginPath(); c.moveTo(x0, y); c.lineTo(x1, y); c.stroke();
-			c.fillStyle = color; c.font = (row === 0 ? '600 11px ' : '10px ') + font;
+			const on = hit && ed.sel.has(hit.item.id), hov = hit && ed.hover && ed.hover.item === hit.item;
+			const col = on ? '#7fe4ff' : color;
+			c.strokeStyle = col; c.globalAlpha = row === 3 && !on ? 0.6 : 1; c.beginPath(); c.moveTo(x0, y); c.lineTo(x1, y); c.stroke(); c.globalAlpha = 1;
+			c.font = (row === 0 ? '600 11px ' : '10px ') + font;
 			let dy = 0;
 			if (row === 3) { const n = stack.get(t) || 0; stack.set(t, n + 1); dy = 11 + n * 11; }
-			c.fillText(txt, x0 + 3 + (row === 2 ? 44 : 0), y - 1 - dy);
+			const tx = x0 + 3 + (row === 2 ? 52 : 0), ty = y - 1 - dy, w = c.measureText(txt).width;
+			if (on || hov) { c.fillStyle = on ? 'rgba(127,228,255,0.18)' : 'rgba(255,255,255,0.08)'; c.fillRect(tx - 2, ty - 11, Math.min(w + 4, x1 - tx + 2), 12); }
+			c.fillStyle = col; c.fillText(txt, tx, ty);
+			if (hit) this.timingHits.push({ x0: tx - 2, x1: Math.min(x1, tx + w + 2), y0: ty - 12, y1: ty + 2, t, ...hit });
 		};
 		for (const s of ch.stops) {
 			if (s.t + s.l < t0 || s.t > t1) continue;
 			const ya = this.yOf(s.t), yb = this.yOf(s.t + s.l);
 			c.fillStyle = ed.sel.has(s.id) ? 'rgba(127,228,255,.35)' : 'rgba(255,90,90,0.25)'; c.fillRect(x1 - 10, yb, 7, ya - yb);
-			label(s.t, 'stop ' + fmtLen(s.l), '#ff7a7a', 2);
+			label(s.t, 'stop ' + fmtLen(s.l), '#ff7a7a', 2, { kind: 'stop', item: s });
 		}
-		for (const s of ch.sig) label(ed.timing.measureStart(s.m), s.n + '/' + s.d, '#e6c84a', 2);
-		for (const b of ch.bpm) label(b.t, '♩' + K.fmtNum(b.v), ed.sel.has(b.id) ? '#7fe4ff' : '#8fe07a', 0);
-		const small = (arr, pre) => { for (const e of arr) label(e.t, pre + e.v, '#8a8a96', 3); };
-		small(ch.filterType, 'filter '); small(ch.slamVol, 'slamvol '); small(ch.pfilterGain, 'pfgain ');
-		for (const r of ch.raw) label(r.t, r.k === '//' ? '// ' + r.v : (r.k || '') + (r.k ? '=' : '') + r.v, '#6f6f7a', 3);
+		for (const s of ch.sig) label(ed.timing.measureStart(s.m), s.n + '/' + s.d, '#e6c84a', 2, { kind: 'sig', item: s });
+		for (const b of ch.bpm) label(b.t, '♩' + K.fmtNum(b.v), '#8fe07a', 0, { kind: 'bpm', item: b });
+		const small = (key, pre, color) => { for (const e of ch[key]) label(e.t, pre + e.v, color, 3, { kind: 'ev', key, item: e }); };
+		small('filterType', 'filter ', '#c9a2ff'); small('pfilterGain', 'pfgain ', '#a2b8ff'); small('slamVol', 'slamvol ', '#ffb27a'); small('slamSE', 'slam se ', '#ffb27a');
+		for (const r of ch.raw) label(r.t, r.k === '//' ? '// ' + r.v : (r.k || '') + (r.k ? '=' : '') + r.v, '#8a8a96', 3, { kind: 'ev', key: 'raw', item: r });
 		c.restore();
 	}
 
@@ -1698,6 +2194,17 @@ class TimelineView {
 		c.save(); c.beginPath(); c.rect(col.l, this.HEAD, col.r - col.l, this.h); c.clip();
 		const def = key === 'scroll_speed' ? 1 : 0;
 		const val = (v) => typeof v === 'number' ? v : null;
+		// dashed ghost: the tilt the game engine actually applies (auto laser tilt + manual), from the preview's USC model
+		if (key === 'tilt' && ed.preview && ed.settings.showTiltGhost !== false) {
+			c.save(); c.setLineDash([4, 3]); c.strokeStyle = 'rgba(255,210,140,0.55)'; c.lineWidth = 1.2; c.beginPath();
+			let first = true;
+			for (let y = this.h; y >= this.HEAD - 4; y -= 3) {
+				const t = this.tickAt(y); if (t < -240) continue;
+				const x = this.colX(col, ed.preview.tiltAtTick(t));
+				if (first) { c.moveTo(x, y); first = false; } else c.lineTo(x, y);
+			}
+			c.stroke(); c.restore();
+		}
 		// graph line
 		c.strokeStyle = info.color; c.lineWidth = 1.5; c.beginPath();
 		const yTop = this.HEAD - 5, yBot = this.h + 5;
@@ -1768,17 +2275,74 @@ function fmtLen(ticks) { // "1/8", "3/16", "1 1/4" measures (4/4 based)
 </script>
 <script>
 /* ============================================================================
- * Preview: perspective SDVX highway with camera effects applied.
- * This is an approximation of KSM's renderer for editing purposes:
- * zoom_top (pitch around judgment line), zoom_bottom (camera distance),
- * zoom_side (shift), center_split, rotation_deg, tilt (auto/manual), spins/swings,
- * scroll_speed and stops.
+ * Preview: SDVX-style highway. The camera is a direct port of USC's portrait
+ * camera (Main/src/Camera.cpp, Track.cpp, Game.cpp, Scoring.cpp; MIT licence),
+ * so zoom_top / zoom_bottom / zoom_side / center_split, the engine's automatic
+ * laser tilt (normal / bigger / biggest / zero / keep_*), manual tilt, slam
+ * roll + slam shake, spins / half spins / swings and hi-speed behave like they
+ * do in USC (which itself mimics SDVX).
+ *
+ * World units: the track is 1 wide (6 lanes of 1/6) and 12 long, judgment
+ * line at y = 0. Visible range = 8 / hi-speed beats.
  * ========================================================================== */
+const M4 = { // column-major 4x4, same conventions as USC's Transform
+	id() { return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]; },
+	mul(a, b) {
+		const r = new Array(16);
+		for (let x = 0; x < 4; x++) for (let y = 0; y < 4; y++) {
+			r[x * 4 + y] = a[y] * b[x * 4] + a[4 + y] * b[x * 4 + 1] + a[8 + y] * b[x * 4 + 2] + a[12 + y] * b[x * 4 + 3];
+		}
+		return r;
+	},
+	tr(x, y, z) { const m = M4.id(); m[12] = x; m[13] = y; m[14] = z; return m; },
+	rot(ex, ey, ez) { // Transform::Rotation(euler degrees)
+		const d = Math.PI / 180, p = -ex * d, yw = -ey * d, r = -ez * d;
+		const a = Math.cos(p), b = Math.sin(p), c = Math.cos(yw), dd = Math.sin(yw), e = Math.cos(r), f = Math.sin(r);
+		const ad = a * dd, bd = b * dd;
+		return [c * e, -c * f, dd, 0, bd * e + a * f, -bd * f + a * e, -b * c, 0, -ad * e + b * f, ad * f + b * e, a * c, 0, 0, 0, 0, 1];
+	},
+	pos(m) { return [m[12], m[13], m[14]]; },
+};
+const PV = {
+	MAX_ROLL: 10 / 360,   // turns
+	TRACK_LEN: 12,        // portrait
+	BTN_W: 1 / 6,
+	FOV: 90, PITCH_OFFSET: 0.25,
+	ROLL_IGNORE: 0.1, SLAM_DUR: 0.1,
+};
+
+function uscPitchScale(input) { // PitchScaleFunc (portrait constants)
+	const kLower = -4, kUpper = 5.59, uLower = -2.8195, uUpper = 4.675;
+	let rot = 0; const dir = input < 0 ? -1 : 1;
+	if (dir === -1) { while (input < -12) { input += 24; rot++; } }
+	else { while (input > 12) { input -= 24; rot++; } }
+	let s;
+	if (input < kLower) s = -(-(input - kLower) / (12 + kLower)) * (12 + uLower) + uLower;
+	else if (input < 0) s = (input / kLower) * uLower;
+	else if (input < kUpper) s = (input / kUpper) * uUpper;
+	else s = ((input - kUpper) / (12 - kUpper)) * (12 - uUpper) + uUpper;
+	return rot * dir * 24 + s;
+}
+function uscOrigin(pitch, offs, roll) { // GetOriginTransform (portrait)
+	const origin = M4.rot(1, 0, roll);
+	const anchor = M4.mul(M4.tr(offs, -0.8, 0), M4.rot(1.5, 0, 0));
+	const contnr = M4.mul(M4.tr(0, 0, -0.9), M4.rot(-90 + pitch, 0, 0));
+	return M4.mul(M4.mul(origin, anchor), contnr);
+}
+function uscZoomed(t, zoom) {
+	const p = M4.pos(t), dist = Math.hypot(p[0], p[1], p[2]);
+	const amt = zoom <= 0 ? Math.pow(1.65, -zoom) - 1 : dist * (Math.pow(1.65, -Math.pow(zoom, 1.35)) - 1);
+	const k = amt / dist;
+	return M4.mul(M4.tr(p[0] * k, p[1] * k, p[2] * k), t);
+}
+const dampedSin = (t, amp, freq, decay) => amp * Math.exp(-decay * t) * Math.sin(freq * 2 * t * Math.PI);
+const uscSwing = (t) => dampedSin(t, 120 / 360, 1, 3.5);
+const sgn = (v) => v > 0 ? 1 : v < 0 ? -1 : 0;
+
 class Preview3D {
 	constructor(canvas, ed) {
 		this.cv = canvas; this.ctx = canvas.getContext('2d', { alpha: false });
-		this.ed = ed; this.ver = -1; this.sm = null;
-		this.tiltCur = 0; this.lastFrame = 0;
+		this.ed = ed; this.ver = -1; this.sim = null;
 		this.resize();
 	}
 	resize() {
@@ -1787,190 +2351,863 @@ class Preview3D {
 		this.w = Math.max(50, Math.floor(r.width)); this.h = Math.max(50, Math.floor(r.height));
 		this.cv.width = Math.floor(this.w * this.dpr); this.cv.height = Math.floor(this.h * this.dpr);
 	}
-	_camera(p) {
-		// Camera fitted to a 9:16 (portrait, like SDVX) view anchored at the bottom of the pane:
-		// judgment line spans 95% of the width at 86% height, horizon sits above the screen,
-		// and the lane narrows to ~35% of its width at the base length (LEN_BASE).
-		const W = this.w, H = this.h;
-		const vw = Math.min(W, H * 9 / 16), vh = vw * 16 / 9, top = H - vh;
-		const phi = 0.5, cph = Math.cos(phi), sph = Math.sin(phi);
-		const camH0 = 11.6 * cph;                       // gives horizon at -17% of the view
-		const dz = K.clamp(p.zb / 100, -3, 3) * 0.5;    // zoom_bottom: move camera forward
-		const camH = camH0 - dz * sph, camD = -dz * cph;
-		const tp = p.zt / 2400 * Math.PI * 2;            // zoom_top: rotate lane around the judgment line
-		const ctp = Math.cos(tp), stp = Math.sin(tp);
-		const zcN0 = camH0 * sph, ycN0 = -camH0 * cph;   // un-zoomed near point
-		const F = vw * 0.95 * zcN0 / 6;
-		const cy = top + vh * 0.86 + F * ycN0 / zcN0;
-		const cx = W / 2 + p.side * F / zcN0;
-		const proj = (x, z) => {
-			const Y = z * stp - camH, Z = z * ctp + camD;
-			const yc = Y * cph + Z * sph, zc = -Y * sph + Z * cph;
-			if (zc < 0.15) return null;
-			return [cx + F * x / zc, cy - F * yc / zc, F / zc];
-		};
-		const base = 1.86 * zcN0 / cph;                  // depth where the lane is 35% wide
-		let len = base;
-		for (; len < base * 3; len += 0.5) { const q = proj(0, len); if (!q || q[1] < H * 0.07) break; }
-		return { proj, len, base };
+	secAt(t) { return this.ed.timing.tickToSec(t); }
+	tickAtSec(s) { return this.ed.timing.secToTick(s); }
+
+	// ------------------------------------------------------------ chart -> engine events
+	_prep() {
+		const ed = this.ed, ch = ed.chart;
+		if (this.ver === ed.version && this.timingRef === ed.timing) return;
+		this.ver = ed.version; this.timingRef = ed.timing;
+		this.sm = new K.ScrollMap(ch);
+		const ev = [];
+		ch.tilt.forEach(p => ev.push({ sec: this.secAt(p.t), o: 0, kind: 'tilt', p }));
+		ch.laser.forEach((lane, li) => lane.forEach(s => {
+			const last = s.pts.length - 1;
+			s.pts.forEach((p, i) => {
+				if (p.v === p.vf) return;
+				// positions as USC stores them (wide lasers in the extended -0.5..1.5 range)
+				const a = K.laserPos(p.v, s.wide), b = K.laserPos(p.vf, s.wide);
+				ev.push({ sec: this.secAt(s.t + p.ry), o: 1, kind: 'slam', lane: li, size: b - a, tail: b, end: i === last });
+			});
+			const lp = s.pts[last];
+			if (lp.v === lp.vf && last > 0) ev.push({ sec: this.secAt(s.t + lp.ry), o: 2, kind: 'exit', lane: li });
+		}));
+		ev.sort((a, b) => a.sec - b.sec || a.o - b.o);
+		this.ev = ev;
+		this.spinsSec = ch.spins.map(s => ({ ...s, sec: this.secAt(s.t), beat: 60 / ed.timing.bpmAt(s.t) })).sort((a, b) => a.sec - b.sec);
+		// BPM covering most of the chart: the base for mod speed
+		const end = Math.max(ed.chartEndTick ? ed.chartEndTick() : 0, 960);
+		const dur = new Map();
+		ch.bpm.forEach((b, i) => {
+			const t0 = i ? b.t : 0, t1 = i + 1 < ch.bpm.length ? ch.bpm[i + 1].t : Math.max(end, t0);
+			const d = Math.max(0, this.secAt(Math.min(t1, end)) - this.secAt(Math.min(t0, end)));
+			dur.set(b.v, (dur.get(b.v) || 0) + d);
+		});
+		let best = ch.bpm.length ? ch.bpm[0].v : 120, bd = -1;
+		for (const [v, d] of dur) if (d > bd) { bd = d; best = v; }
+		this.baseBpm = best;
+		this.sim = null;
 	}
-	draw(nowTick) {
-		const ed = this.ed, ch = ed.chart, c = this.ctx, W = this.w, H = this.h;
-		const now = performance.now(), dt = this.lastFrame ? Math.min(0.1, (now - this.lastFrame) / 1000) : 0.016;
-		this.lastFrame = now;
-		if (this.ver !== ed.version) { this.sm = new K.ScrollMap(ch); this.ver = ed.version; }
-		const sm = this.sm;
-		const vNow = sm.at(nowTick);
-		const beats = ed.settings.previewBeats;
-
-		// camera parameters at the current tick
+	// Scoring::GetLaserRollOutput: current laser position, or an upcoming laser within 2 beats
+	_laserOut(lane, tick) {
+		const arr = this.ed.chart.laser[lane];
+		const i = K.upperBound(arr, tick) - 1;
+		const out = (raw) => lane === 0 ? -raw : 1 - raw;
+		if (i >= 0) {
+			const s = arr[i], lp = s.pts[s.pts.length - 1];
+			if (tick < s.t + lp.ry) { const v = K.laserValueAt(s, Math.floor(tick)); if (v !== null) return out(K.laserPos(v, s.wide)); }
+		}
+		const nx = arr[i + 1];
+		if (nx && nx.t - tick <= 480) return out(K.laserPos(nx.pts[0].v, nx.wide));
+		return 0;
+	}
+	_freshSim(sec) {
+		const st = { sec, crit: 0, roll: 0, intensity: PV.MAX_ROLL, oldIntensity: PV.MAX_ROLL, manual: false, toggled: false, keep: false, keepTarget: 0,
+			ignore: [0, 0], slamRoll: [0, 0], shake: 0, shakeAdd: 0, guard: 0, ei: 0 };
+		const ch = this.ed.chart, tick = this.tickAtSec(sec);
+		const tp = K.lastAtOrBefore(ch.tilt, tick);
+		if (tp) { this._applyTilt(st, tp); st.oldIntensity = st.intensity; st.toggled = false; }
+		const ev = this.ev; let lo = 0, hi = ev.length;
+		while (lo < hi) { const m = (lo + hi) >> 1; if (ev[m].sec <= sec) lo = m + 1; else hi = m; }
+		st.ei = lo;
+		return st;
+	}
+	_applyTilt(st, p) { // Game::OnEventChanged(TrackRollBehaviour)
+		const v = p.vf !== undefined ? p.vf : p.v;
+		let manual = false, lvl = 1, keep = false;
+		if (typeof v === 'number') manual = true;
+		else { keep = v.startsWith('keep_'); const b = keep ? v.slice(5) : v; lvl = { zero: 0, normal: 1, bigger: 2, biggest: 3 }[b] ?? 1; }
+		st.keep = keep && !manual;
+		if (manual !== st.manual) st.toggled = true;
+		st.manual = manual;
+		const inten = manual ? st.intensity : lvl === 0 ? 0 : PV.MAX_ROLL * (1 + 0.75 * (lvl - 1));
+		st.oldIntensity = st.intensity; st.intensity = inten;
+	}
+	// One frame of Game::Tick (camera part) + Camera::Tick
+	_step(st, sec, dt) {
+		const ev = this.ev;
+		while (st.ei < ev.length && ev[st.ei].sec <= sec) {
+			const e = ev[st.ei++];
+			if (e.kind === 'tilt') this._applyTilt(st, e.p);
+			else if (e.kind === 'slam') {
+				if (st.guard <= 0) st.shakeAdd = -e.size;
+				if (e.end) { st.slamRoll[e.lane] = e.lane === 0 ? -e.tail : 1 - e.tail; st.ignore[e.lane] = PV.ROLL_IGNORE + PV.SLAM_DUR; }
+			} else st.ignore[e.lane] = PV.ROLL_IGNORE;
+		}
+		const tick = this.tickAtSec(sec), MR = PV.MAX_ROLL;
+		const live = [0, 1].map(l => st.ignore[l] <= 0 ? this._laserOut(l, tick) : null);
+		const rL1 = live[0] ?? st.slamRoll[0], rR1 = live[1] ?? st.slamRoll[1];
+		const slowTilt = (rL1 === -1 && rR1 === 1) || (rL1 === 0 && rR1 === 0);
+		const target = (live[0] ?? 0) + (live[1] ?? 0);
+		// SetTargetRoll
+		const critTarget = K.clamp(target + st.slamRoll[0] + st.slamRoll[1], -1, 1) * MR;
+		const keepT = K.clamp(target, -1, 1);
+		if (!st.keep || st.keepTarget === 0 || (sgn(st.keepTarget) === sgn(keepT) && Math.abs(st.keepTarget) < Math.abs(keepT))) st.keepTarget = keepT;
+		// Camera::Tick
+		const lerpTo = (v, tg, speed) => { const c = dt * speed; return tg < v ? Math.max(v - c, tg) : Math.min(v + c, tg); };
+		let speed = MR * 4;
+		if (slowTilt) speed /= Math.abs(st.crit) > MR * 0.1 ? 4 : 8;
+		st.crit = lerpTo(st.crit, critTarget, speed);
+		let actual = 0, instant = false;
+		if (st.manual) {
+			const ch = this.ed.chart;
+			actual = -K.graphValueAt(ch.tilt, tick, 0) * MR;
+			const lp = K.lastAtOrBefore(ch.tilt, tick);
+			instant = !!(lp && lp.vf !== undefined && typeof lp.vf === 'number');
+		} else if (st.keep) actual = st.keepTarget * st.intensity;
+		else actual = (st.crit / MR) * st.intensity;
+		if (instant) st.roll = actual;
+		else {
+			speed = MR * 4 * Math.max(st.intensity, st.oldIntensity) / MR;
+			if (speed === 0 || st.manual || st.toggled) speed = MR * 4 * 2.5;
+			if (st.manual || st.toggled) { const d = Math.abs(st.roll - actual) - MR; if (d > 0) speed *= 1 + d * 360 / 2.5; }
+			st.roll = lerpTo(st.roll, actual, speed);
+		}
+		if (st.toggled) st.toggled = st.roll !== actual;
+		for (let i = 0; i < 2; i++) { st.ignore[i] -= dt; if (st.ignore[i] <= PV.ROLL_IGNORE) st.slamRoll[i] = 0; }
+		if (st.shakeAdd !== 0) { st.shake += st.shakeAdd; st.shakeAdd = 0; st.guard = 1 / 60; }
+		else if (st.shake !== 0) st.shake = Math.max(Math.abs(st.shake) - 0.2 * dt * 60, 0) * sgn(st.shake);
+		st.guard -= dt;
+		st.sec = sec;
+	}
+	_simTo(sec, continuous) {
+		this._prep();
+		let st = this.sim;
+		if (!continuous || !st || sec < st.sec - 1e-9 || sec - st.sec > 1) st = this._freshSim(sec - 2.5);
+		const h = 1 / 240;
+		while (st.sec + h < sec) this._step(st, st.sec + h, h);
+		if (sec > st.sec) this._step(st, sec, sec - st.sec);
+		this.sim = st;
+		return st;
+	}
+	// camera parameters at a tick
+	cameraAt(nowTick, continuous) {
+		this._prep();
+		const ch = this.ed.chart, sec = this.secAt(nowTick);
 		const g = (k) => K.graphValueAt(ch.cam[k], nowTick, 0);
-		const cam = { zt: g('zoom_top'), zb: g('zoom_bottom'), side: g('zoom_side') * 0.015, split: g('center_split') / 100, rot: g('rotation_deg') };
-		const { proj, len, base } = this._camera(cam);
-		const zOf = (t) => (sm.at(t) - vNow) / beats * base;
+		const ver = parseInt(ch.meta.ver, 10) || 0;
+		const st = this._simTo(sec, continuous);
+		const cam = {
+			zoom: g('zoom_bottom') / 100, pitchIn: g('zoom_top') / 100, offset: g('zoom_side') / 100, split: g('center_split') / 100,
+			rot: g('rotation_deg'), pitchUnit: ver >= 168 ? 15 : 7, roll: st.roll, shake: st.shake, spinRoll: 0, bounce: 0,
+		};
+		// the latest spin of any kind wins (one spin state in USC)
+		const sp = this.spinsSec; let lo = 0, hi = sp.length;
+		while (lo < hi) { const m = (lo + hi) >> 1; if (sp[m].sec <= sec) lo = m + 1; else hi = m; }
+		const s = sp[lo - 1];
+		if (s) {
+			const isSwing = s.kind === 'swing';
+			const dur = (isSwing ? 0.5 : 1) * (s.l / 5 / 192) * s.beat * 4;
+			const prog = (sec - s.sec) / dur;
+			if (prog < 2) {
+				if (s.kind === 'spin') {
+					const t = prog / 2, TS = 0.375, TR = 0.375;
+					if (t <= TS) cam.spinRoll = -s.dir * (TS - t) / TS;
+					else if (t < TS + TR) cam.spinRoll = uscSwing((t - TS) / TR) * 0.25 * s.dir;
+				} else if (s.kind === 'half') cam.spinRoll = uscSwing(prog / 2) * s.dir;
+				else cam.bounce = dampedSin(prog / 2, (s.amp || 0) / 250, (s.rep || 0) / 2, 3.0) * s.dir;
+			}
+		}
+		return cam;
+	}
+	hiSpeed() {
+		const S = this.ed.settings;
+		if (S.speedMode === 'hs') return Math.max(0.1, S.hiSpeed || 1);
+		return Math.max(0.1, (S.modSpeed || 700) / (this.baseBpm || 120));
+	}
 
-		// roll: rotation_deg + tilt + spins
-		let roll = cam.rot, sway = 0, spin = 0;
-		roll += this._tilt(nowTick, dt);
-		for (const s of ch.spins) {
-			if (nowTick < s.t || nowTick > s.t + s.l || s.l <= 0) continue;
-			const p = (nowTick - s.t) / s.l;
-			if (s.kind === 'spin') spin += s.dir * 360 * (1 - Math.pow(1 - p, 2.2));
-			else if (s.kind === 'half') spin += s.dir * 120 * Math.sin(Math.PI * p) * (1 - p * 0.5);
-			else {
-				const decay = s.dec === 0 ? 1 : s.dec === 1 ? 1 - p : (1 - p) * (1 - p);
-				const osc = Math.sin(Math.PI * s.rep * p) * decay;
-				roll += s.dir * (s.amp / 250) * 10 * osc; sway += s.dir * (s.amp / 250) * 0.6 * osc;
+	// ------------------------------------------------------------ drawing
+	draw(nowTick, continuous) {
+		const ed = this.ed, ch = ed.chart, c = this.ctx, S = ed.settings;
+		const cam = this.cameraAt(nowTick, continuous);
+		const W = this.w, H = this.h, BW = PV.BTN_W, TL = PV.TRACK_LEN;
+		// USC's camera is tuned for a 9:16 portrait screen: fit that box to the pane, and let the
+		// picture continue past it when the pane is taller or wider (no letterboxing).
+		// In a narrow pane the box may overhang the sides a little (the track itself spans ~81% of it).
+		const vw = Math.min(H * 9 / 16, W / 0.86), vh = vw * 16 / 9;
+		const vx = (W - vw) / 2, vy = (H - vh) / 2;
+
+		// ---- USC camera
+		const lanePitch = uscPitchScale(cam.pitchIn) * cam.pitchUnit;
+		const totalOffset = (cam.offset * (5 * 100) / (6 * 116)) / 2 + cam.bounce;
+		const worldNormal = uscOrigin(lanePitch, totalOffset, (cam.spinRoll + cam.roll) * 360 - cam.rot); // rotation_deg has the same sign as tilt (KSM v2: rotation_deg 10 == tilt 1)
+		const worldNoRoll = uscOrigin(lanePitch, 0, 0);
+		const trackOrigin = uscZoomed(worldNormal, cam.zoom);
+		const critOrigin = uscZoomed(uscOrigin(lanePitch, totalOffset, cam.roll * 360 + Math.sin(cam.spinRoll * Math.PI * 2) * 20 - cam.rot), cam.zoom);
+		const cp = M4.pos(worldNoRoll), cl = Math.hypot(cp[0], cp[1], cp[2]);
+		const rotToCrit = -Math.atan2(cp[1] / cl, -cp[2] / cl) * 180 / Math.PI;
+		const camPitch = rotToCrit - (PV.FOV / 2 - PV.FOV * PV.PITCH_OFFSET);
+		const view = M4.rot(camPitch, cam.shake, 0);
+		const fy = 1 / Math.tan(PV.FOV / 2 * Math.PI / 180), fx = fy / (vw / vh);
+		const mT = M4.mul(view, trackOrigin), mC = M4.mul(view, critOrigin);
+		const NEAR = 0.05;
+		const V = (m, x, y) => [m[0] * x + m[4] * y + m[12], m[1] * x + m[5] * y + m[13], m[2] * x + m[6] * y + m[14]];
+		const S2 = (v) => [vx + (v[0] * fx / -v[2] * 0.5 + 0.5) * vw, vy + (0.5 - v[1] * fy / -v[2] * 0.5) * vh];
+		const P = (m, x, y) => { const v = V(m, x, y); return v[2] > -NEAR ? null : S2(v); }; // track plane point -> screen
+		const clipNear = (vs) => { // Sutherland-Hodgman against z = -NEAR (keeps z <= -NEAR)
+			const out = [];
+			for (let i = 0; i < vs.length; i++) {
+				const a = vs[i], b = vs[(i + 1) % vs.length], ia = a[2] <= -NEAR, ib = b[2] <= -NEAR;
+				if (ia) out.push(a);
+				if (ia !== ib) { const t = (-NEAR - a[2]) / (b[2] - a[2]); out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, -NEAR]); }
+			}
+			return out;
+		};
+
+		c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+		const far = P(mT, 0, TL * 1.2) || [vx + vw / 2, vy + vh * 0.3];
+		const bg = c.createRadialGradient(far[0], far[1], 2, far[0], far[1], Math.max(W, H) * 0.8);
+		bg.addColorStop(0, '#3b2260'); bg.addColorStop(0.25, '#1a1030'); bg.addColorStop(0.6, '#08060f'); bg.addColorStop(1, '#020205');
+		c.fillStyle = bg; c.fillRect(0, 0, W, H);
+
+		// ---- timing
+		this._prep();
+		const sm = this.sm;
+		const drawSec = this.secAt(nowTick) - (S.drawOffsetMs || 0) / 1000;
+		const drawTick = this.tickAtSec(drawSec);
+		const bpm = ed.timing.bpmAt(Math.max(0, nowTick));
+		const hs = this.hiSpeed();
+		const viewRange = 8 / hs;
+		const vNow = sm.at(drawTick);
+		const yOf = (t) => (sm.at(t) - vNow) / viewRange * TL;
+		const split = cam.split * 0.5 * BW;
+		const sideX = (x) => x < -1e-6 ? x - split : x > 1e-6 ? x + split : x;
+
+		// filled polygon given in track-plane coordinates [[x, y], ...]
+		const poly = (m, pts, fill) => {
+			const vs = clipNear(pts.map(p => V(m, p[0], p[1])));
+			if (vs.length < 3) return;
+			c.fillStyle = fill; c.beginPath();
+			vs.forEach((v, i) => { const q = S2(v); if (i) c.lineTo(q[0], q[1]); else c.moveTo(q[0], q[1]); });
+			c.closePath(); c.fill();
+		};
+		const quad = (m, x0, x1, y0, y1, fill) => {
+			y0 = Math.max(y0, -1); y1 = Math.min(y1, TL);
+			if (y1 <= y0) return;
+			poly(m, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], fill);
+		};
+		const line = (m, x0, y0, x1, y1, col, w) => {
+			let a = V(m, x0, y0), b = V(m, x1, y1);
+			const ia = a[2] <= -NEAR, ib = b[2] <= -NEAR;
+			if (!ia && !ib) return;
+			if (ia !== ib) { const t = (-NEAR - a[2]) / (b[2] - a[2]), q = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, -NEAR]; if (ia) b = q; else a = q; }
+			const p = S2(a), q = S2(b);
+			c.strokeStyle = col; c.lineWidth = w; c.beginPath(); c.moveTo(p[0], p[1]); c.lineTo(q[0], q[1]); c.stroke();
+		};
+		c.save();
+
+		// ---- track (EG look: near-black translucent deck, white lane lines, neon edge rails)
+		for (const side of [-1, 1]) {
+			const dx = side * split;
+			const x0 = side < 0 ? -0.5 : 0, x1 = side < 0 ? 0 : 0.5;
+			quad(mT, x0 + dx, x1 + dx, -1, TL, 'rgba(3,3,8,0.84)');
+			quad(mT, (side < 0 ? -0.5 : 0.5 - BW) + dx, (side < 0 ? -0.5 + BW : 0.5) + dx, -1, TL, side < 0 ? 'rgba(20,110,200,0.22)' : 'rgba(200,20,120,0.22)');
+		}
+		for (let i = 1; i <= 5; i++) { const x = sideX(-0.5 + i * BW); line(mT, x, -1, x, TL, i === 1 || i === 5 ? 'rgba(225,235,255,0.62)' : 'rgba(200,210,235,0.42)', i === 3 ? 1.3 : 1.1); }
+		for (const [x, col, glow] of [[-0.5 - split, '#7fdcff', 'rgba(40,180,255,0.30)'], [0.5 + split, '#ff8fcf', 'rgba(255,40,160,0.30)']]) {
+			line(mT, x, -1, x, TL, glow, 8);
+			line(mT, x, -1, x, TL, col, 2.2);
+		}
+
+		// ---- bar lines
+		let tEnd = drawTick;
+		for (let k = 0; k < 2000 && yOf(tEnd) < TL; k++) tEnd += 60;
+		const tStart = drawTick - 480;
+		let ms = ed.timing.measureOf(Math.max(0, tStart));
+		for (let k = 0; k < 256 && ms.start <= tEnd; k++) {
+			const y = yOf(ms.start);
+			if (y >= 0 && y <= TL) { line(mT, sideX(-0.5 + BW), y, -split, y, 'rgba(255,255,255,0.28)', 1); line(mT, split, y, sideX(0.5 - BW), y, 'rgba(255,255,255,0.28)', 1); }
+			ms = ed.timing.measureOf(ms.start + ms.len);
+		}
+		const range = (arr) => { let i0 = K.lowerBound(arr, tStart); while (i0 > 0 && arr[i0 - 1].t + (arr[i0 - 1].l || 0) > tStart) i0--; return [i0, K.upperBound(arr, tEnd)]; };
+		const playing = ed.playing;
+		const chipLen = (y) => 0.125 * (1 + K.clamp(y / TL, 0, 1)); // USC: 48/64 texture ratio x 1/6, distantButtonScale = 2
+		const fxX = (lane) => -2 * BW + lane * 2 * BW + (lane ? split : -split);
+		const btX = (lane) => -2 * BW + lane * BW + (lane < 2 ? -split : split);
+
+		// ---- holds (FX under BT)
+		for (let lane = 0; lane < 2; lane++) {
+			const a = ch.fx[lane], [i0, i1] = range(a), x0 = fxX(lane);
+			for (let i = i0; i < i1; i++) {
+				const n = a[i]; if (n.l <= 0) continue;
+				const on = playing && nowTick >= n.t && nowTick <= n.t + n.l;
+				quad(mT, x0 + 0.01, x0 + 2 * BW - 0.01, Math.max(0, yOf(n.t)), yOf(n.t + n.l), on ? 'rgba(255,205,110,0.92)' : 'rgba(255,150,30,0.78)');
+			}
+		}
+		for (let lane = 0; lane < 4; lane++) {
+			const a = ch.bt[lane], [i0, i1] = range(a), x0 = btX(lane);
+			for (let i = i0; i < i1; i++) {
+				const n = a[i]; if (n.l <= 0) continue;
+				const on = playing && nowTick >= n.t && nowTick <= n.t + n.l;
+				quad(mT, x0 + 0.022, x0 + BW - 0.022, Math.max(0, yOf(n.t)), yOf(n.t + n.l), on ? 'rgba(255,255,255,0.95)' : 'rgba(215,228,255,0.72)');
+			}
+		}
+		// ---- chips
+		for (let lane = 0; lane < 2; lane++) {
+			const a = ch.fx[lane], [i0, i1] = range(a), x0 = fxX(lane);
+			for (let i = i0; i < i1; i++) {
+				const n = a[i]; if (n.l !== 0 || n.t < drawTick - 2) continue;
+				const y = yOf(n.t), L = chipLen(y);
+				quad(mT, x0 + 0.006, x0 + 2 * BW - 0.006, y, y + L, '#ff8c10');
+				quad(mT, x0 + 0.03, x0 + 2 * BW - 0.03, y + L * 0.25, y + L * 0.75, '#ffc060');
+			}
+		}
+		for (let lane = 0; lane < 4; lane++) {
+			const a = ch.bt[lane], [i0, i1] = range(a), x0 = btX(lane);
+			for (let i = i0; i < i1; i++) {
+				const n = a[i]; if (n.l !== 0 || n.t < drawTick - 2) continue;
+				const y = yOf(n.t), L = chipLen(y);
+				quad(mT, x0 + 0.008, x0 + BW - 0.008, y, y + L, '#ffffff');
+				quad(mT, x0 + 0.03, x0 + BW - 0.03, y + L * 0.25, y + L * 0.75, '#d4e2ff');
 			}
 		}
 
-		c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-		const bg = c.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#07070c'); bg.addColorStop(1, '#141024');
-		c.fillStyle = bg; c.fillRect(0, 0, W, H);
-		const pv = proj(0, 0);
-		if (!pv) return;
-		c.save();
-		if (spin) { // spins turn the whole lane around its middle
-			const mid = proj(0, base * 0.3) || pv;
-			c.translate(mid[0], mid[1]); c.rotate(spin * Math.PI / 180); c.translate(-mid[0], -mid[1]);
-		}
-		c.translate(pv[0], pv[1]); c.rotate(roll * Math.PI / 180); c.translate(-pv[0], -pv[1]);
-		const sp = cam.split / 2;
-		const X = (x) => x + sway + (x < -1e-6 ? -sp : x > 1e-6 ? sp : 0);
-		const quad = (xa, xb, za, zb2, fill) => {
-			za = Math.max(za, -0.4); zb2 = Math.min(zb2, len);
-			if (zb2 <= za) return;
-			const p1 = proj(X(xa), za), p2 = proj(X(xb), za), p3 = proj(X(xb), zb2), p4 = proj(X(xa), zb2);
-			if (!p1 || !p2 || !p3 || !p4) return;
-			c.fillStyle = fill; c.beginPath(); c.moveTo(p1[0], p1[1]); c.lineTo(p2[0], p2[1]); c.lineTo(p3[0], p3[1]); c.lineTo(p4[0], p4[1]); c.closePath(); c.fill();
-		};
-		// track
-		quad(-3, -2, -0.4, len, '#0d1a2a'); quad(2, 3, -0.4, len, '#2a0d1c');
-		quad(-2, 2, -0.4, len, '#17171e');
-		c.strokeStyle = '#34343f'; c.lineWidth = 1; c.beginPath();
-		for (const x of [-3, -2, -1, 0, 1, 2, 3]) { const a = proj(X(x), -0.4), b = proj(X(x), len); if (a && b) { c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); } }
-		c.stroke();
-		// visible tick range
-		let tEnd = nowTick;
-		for (let k = 0; k < 256; k++) { tEnd += 240; if (zOf(tEnd) > len) break; }
-		const tStart = nowTick - 480;
-		// bar lines
-		let ms = ed.timing.measureOf(Math.max(0, tStart));
-		c.strokeStyle = 'rgba(255,255,255,0.18)'; c.beginPath();
-		for (let k = 0; k < 64 && ms.start <= tEnd; k++) {
-			const z = zOf(ms.start);
-			if (z >= 0 && z <= len) { const a = proj(X(-2), z), b = proj(X(2), z); if (a && b) { c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); } }
-			ms = ed.timing.measureOf(ms.start + ms.len);
-		}
-		c.stroke();
-		const range = (arr) => { let i0 = K.lowerBound(arr, tStart); while (i0 > 0 && arr[i0 - 1].t + (arr[i0 - 1].l || 0) > tStart) i0--; return [i0, K.upperBound(arr, tEnd)]; };
-		// holds
-		for (let lane = 0; lane < 2; lane++) { const a = ch.fx[lane], [i0, i1] = range(a); for (let i = i0; i < i1; i++) { const n = a[i]; if (n.l > 0) quad(-2 + lane * 2 + 0.06, lane * 2 - 0.06, zOf(n.t), zOf(n.t + n.l), nowTick >= n.t && nowTick <= n.t + n.l && ed.playing ? 'rgba(255,190,90,0.75)' : 'rgba(255,140,20,0.55)'); } }
-		for (let lane = 0; lane < 4; lane++) { const a = ch.bt[lane], [i0, i1] = range(a); for (let i = i0; i < i1; i++) { const n = a[i]; if (n.l > 0) quad(-2 + lane + 0.12, -1 + lane - 0.12, zOf(n.t), zOf(n.t + n.l), nowTick >= n.t && nowTick <= n.t + n.l && ed.playing ? 'rgba(255,255,255,0.85)' : 'rgba(230,230,235,0.6)'); } }
-		// chips (fixed thickness in beats)
-		const chipZ = 0.14;
-		for (let lane = 0; lane < 2; lane++) { const a = ch.fx[lane], [i0, i1] = range(a); for (let i = i0; i < i1; i++) { const n = a[i]; if (n.l === 0 && n.t >= nowTick - 10) { const z = zOf(n.t); quad(-2 + lane * 2 + 0.04, lane * 2 - 0.04, z, z + chipZ * 1.2, '#ff9a1f'); } } }
-		for (let lane = 0; lane < 4; lane++) { const a = ch.bt[lane], [i0, i1] = range(a); for (let i = i0; i < i1; i++) { const n = a[i]; if (n.l === 0 && n.t >= nowTick - 10) { const z = zOf(n.t); quad(-2 + lane + 0.06, -1 + lane - 0.06, z, z + chipZ, '#f6f6f8'); } } }
-		// lasers
-		const lcol = [['rgba(47,184,255,0.62)', '#9fe3ff'], ['rgba(255,61,154,0.62)', '#ffb0d4']];
+		// ---- lasers (USC: x = (pos - 0.5) * (trackWidth - laserWidth), width = 1/6)
+		const LW = BW, lx = (pos) => (pos - 0.5) * (1 - LW), SLAM_H = LW * 0.9;
+		const lcol = ['rgba(40,170,255,0.62)', 'rgba(255,50,160,0.62)'];
 		const cursors = [];
+		c.globalCompositeOperation = 'lighter';
 		for (let lane = 0; lane < 2; lane++) {
 			const arr = ch.laser[lane];
 			for (let i = K.upperBound(arr, tEnd) - 1; i >= 0; i--) {
-				const s = arr[i]; const end = K.sectionEndTick(s);
-				if (end < tStart) { if (s.t + 960 * 32 < tStart) break; continue; }
-				const xOf = (v) => (K.laserPos(v, s.wide) - 0.5) * 5;
+				const s = arr[i], end = K.sectionEndTick(s);
+				if (end < drawTick - 60) { if (s.t + 960 * 64 < tStart) break; continue; }
 				const pts = s.pts;
 				for (let k = 0; k < pts.length; k++) {
-					const p = pts[k], q = pts[k + 1], t = s.t + p.ry;
-					if (p.v !== p.vf) { const z = zOf(t), x0 = xOf(p.v), x1 = xOf(p.vf); quad(Math.min(x0, x1) - 0.5, Math.max(x0, x1) + 0.5, z, z + 0.22, lcol[lane][0]); }
-					if (!q) continue;
+					const p = pts[k], q = pts[k + 1], t = s.t + p.ry, slam = p.v !== p.vf;
+					if (slam && t >= drawTick - 1) { // slam: horizontal bar
+						const y = yOf(t), xa = lx(K.laserPos(p.v, s.wide)), xb = lx(K.laserPos(p.vf, s.wide));
+						quad(mT, Math.min(xa, xb) - LW / 2, Math.max(xa, xb) + LW / 2, y, y + SLAM_H, lcol[lane]);
+					}
+					if (!q) { // short tail after a final slam
+						if (slam) { const y = yOf(t) + SLAM_H, x = lx(K.laserPos(p.vf, s.wide)); quad(mT, x - LW / 2, x + LW / 2, Math.max(0, y), y + LW * 1.2, lcol[lane]); }
+						continue;
+					}
 					const tq = s.t + q.ry;
-					if (tq < tStart || t > tEnd) continue;
-					const N = K.isLinear(p) ? Math.max(1, Math.ceil((tq - t) / 120)) : 12;
+					if (tq < drawTick || t > tEnd) continue;
+					const N = K.isLinear(p) ? 1 : 24;
 					for (let j = 0; j < N; j++) {
-						const ta = t + (tq - t) * j / N, tb = t + (tq - t) * (j + 1) / N;
-						const va = p.vf + (q.v - p.vf) * K.evalCurve(p.a, p.b, j / N), vb = p.vf + (q.v - p.vf) * K.evalCurve(p.a, p.b, (j + 1) / N);
-						const za = Math.max(-0.4, zOf(ta)), zb2 = Math.min(len, zOf(tb));
-						if (zb2 <= za) continue;
-						const xa = xOf(va), xb = xOf(vb);
-						const p1 = proj(X(xa - 0.5), za), p2 = proj(X(xa + 0.5), za), p3 = proj(X(xb + 0.5), zb2), p4 = proj(X(xb - 0.5), zb2);
-						if (!p1 || !p2 || !p3 || !p4) continue;
-						c.fillStyle = lcol[lane][0]; c.beginPath(); c.moveTo(p1[0], p1[1]); c.lineTo(p2[0], p2[1]); c.lineTo(p3[0], p3[1]); c.lineTo(p4[0], p4[1]); c.closePath(); c.fill();
+						const fa = j / N, fb = (j + 1) / N;
+						const ta = t + (tq - t) * fa, tb = t + (tq - t) * fb;
+						if (tb < drawTick) continue;
+						const va = p.vf + (q.v - p.vf) * K.evalCurve(p.a, p.b, fa), vb = p.vf + (q.v - p.vf) * K.evalCurve(p.a, p.b, fb);
+						let ya = yOf(ta) + (j === 0 && slam ? SLAM_H : 0), yb = yOf(tb);
+						let xa = lx(K.laserPos(va, s.wide)), xb = lx(K.laserPos(vb, s.wide));
+						if (yb <= ya) continue;
+						if (ya < 0) { const f = -ya / (yb - ya); xa += (xb - xa) * f; ya = 0; }
+						if (yb > TL) { const f = (TL - ya) / (yb - ya); xb = xa + (xb - xa) * f; yb = TL; }
+						if (yb <= ya) continue;
+						poly(mT, [[xa - LW / 2, ya], [xa + LW / 2, ya], [xb + LW / 2, yb], [xb - LW / 2, yb]], lcol[lane]);
 					}
 				}
-				if (nowTick >= s.t && nowTick <= end) { const v = K.laserValueAt(s, Math.round(nowTick)); if (v !== null) cursors.push([lane, xOf(v)]); }
+				if (nowTick >= s.t && nowTick <= end) { const v = K.laserValueAt(s, Math.floor(nowTick)); if (v !== null) cursors.push([lane, lx(K.laserPos(v, s.wide))]); }
 			}
 		}
-		// judgment line + laser cursors
-		const j1 = proj(X(-3), 0), j2 = proj(X(3), 0);
-		if (j1 && j2) { c.strokeStyle = '#ffffff'; c.lineWidth = 3; c.beginPath(); c.moveTo(j1[0], j1[1]); c.lineTo(j2[0], j2[1]); c.stroke(); c.lineWidth = 1; }
+		c.globalCompositeOperation = 'source-over';
+		// far fade
+		const fa = P(mT, 0, TL * 0.72), fb = P(mT, 0, TL);
+		if (fa && fb) {
+			const gr = c.createLinearGradient(fa[0], fa[1], fb[0], fb[1]);
+			gr.addColorStop(0, 'rgba(20,12,36,0)'); gr.addColorStop(1, 'rgba(28,18,50,0.85)');
+			poly(mT, [[-0.5 - split - 0.02, TL * 0.72], [0.5 + split + 0.02, TL * 0.72], [0.5 + split + 0.02, TL], [-0.5 - split - 0.02, TL]], gr);
+		}
+
+		// ---- judgment line + laser cursors (crit transform)
+		line(mC, -0.52, 0, 0.52, 0, 'rgba(90,190,255,0.45)', 10);
+		line(mC, -0.52, 0, 0.52, 0, '#ffffff', 3);
 		for (const [lane, x] of cursors) {
-			const p = proj(X(x), 0); if (!p) continue;
-			c.fillStyle = lane ? '#ff3d9a' : '#2fb8ff';
-			c.beginPath(); c.moveTo(p[0], p[1] - 4); c.lineTo(p[0] - 9, p[1] + 12); c.lineTo(p[0] + 9, p[1] + 12); c.closePath(); c.fill();
+			poly(mC, [[x, 0.01], [x - 0.055, -0.11], [x + 0.055, -0.11]], lane ? '#ff4aa0' : '#3ab4ff');
+			c.strokeStyle = '#fff'; c.lineWidth = 1; c.stroke();
 		}
 		c.restore();
-		// far fade
-		const fade = c.createLinearGradient(0, 0, 0, H * 0.35); fade.addColorStop(0, 'rgba(7,7,12,1)'); fade.addColorStop(1, 'rgba(7,7,12,0)');
-		c.fillStyle = fade; c.fillRect(0, 0, W, H * 0.35);
-		// HUD
-		c.font = '11px ' + UI_FONT; c.fillStyle = '#8a8a96'; c.textBaseline = 'top';
+
+		// ---- HUD
+		const hx = Math.max(vx, 0) + 6, hy = Math.max(vy, 0) + 6;
+		c.font = '11px ' + UI_FONT; c.textBaseline = 'top'; c.fillStyle = 'rgba(220,220,235,0.85)';
+		c.fillText('BPM ' + K.fmtNum(bpm) + '   LANE-SPEED ' + (hs * bpm / 100).toFixed(2) + '   HS ' + hs.toFixed(2), hx, hy);
 		const hud = [];
-		if (cam.zt) hud.push('top ' + Math.round(cam.zt)); if (cam.zb) hud.push('bottom ' + Math.round(cam.zb)); if (cam.side) hud.push('side ' + Math.round(cam.side / 0.015));
-		if (cam.rot) hud.push('rot ' + Math.round(cam.rot) + '°'); if (cam.split) hud.push('split ' + Math.round(cam.split * 100));
-		c.fillText(hud.join('  '), 6, 6);
-		c.fillText('BPM ' + K.fmtNum(ed.timing.bpmAt(nowTick)), 6, H - 18);
+		if (cam.pitchIn) hud.push('top ' + Math.round(cam.pitchIn * 100));
+		if (cam.zoom) hud.push('btm ' + Math.round(cam.zoom * 100));
+		if (cam.offset) hud.push('side ' + Math.round(cam.offset * 100));
+		if (cam.rot) hud.push('rot ' + Math.round(cam.rot) + '°');
+		if (cam.split) hud.push('split ' + Math.round(cam.split * 100));
+		hud.push('tilt ' + (-cam.roll * 360).toFixed(1) + '°');
+		c.fillStyle = 'rgba(170,170,190,0.75)';
+		c.fillText(hud.join('  '), hx, hy + 14);
+		if (S.drawOffsetMs) c.fillText('DRAW ' + (S.drawOffsetMs > 0 ? '+' : '') + S.drawOffsetMs + ' ms', hx, hy + 28);
 	}
-	_tilt(t, dt) {
-		const ch = this.ed.chart;
-		const tp = K.lastAtOrBefore(ch.tilt, t);
-		let target = 0;
-		const ver = parseInt(ch.meta.ver_compat || ch.meta.ver || '171', 10) || 0;
-		const unit = ver < 170 && ch.tilt.some(p => typeof p.v === 'number' && Math.abs(p.v) >= 10) ? 14 : 10;
-		const manual = tp && (typeof (tp.vf !== undefined ? tp.vf : tp.v) === 'number' || (typeof tp.v === 'number' && t > tp.t && tp.vf === undefined));
-		if (manual) target = -K.graphValueAt(ch.tilt, t, 0) * unit;
-		else {
-			const type = tp ? (typeof tp.vf === 'string' ? tp.vf : tp.v) : 'normal';
-			const scale = { normal: 1, bigger: 1.75, biggest: 2.5, keep_normal: 1, keep_bigger: 1.75, keep_biggest: 2.5, zero: 0 }[type] ?? 1;
-			let l = null, r = null;
-			for (let lane = 0; lane < 2; lane++) {
-				const arr = ch.laser[lane], i = K.upperBound(arr, t) - 1;
-				if (i < 0) continue;
-				const s = arr[i]; if (t > K.sectionEndTick(s)) continue;
-				const v = K.laserValueAt(s, Math.round(t)); if (v === null) continue;
-				const pos = K.laserPos(v, s.wide);
-				if (lane === 0) l = pos; else r = pos;
-			}
-			let input = 0;
-			if (l !== null) input += l; if (r !== null) input += r - 1;
-			target = -Math.max(-1, Math.min(1, input)) * 10 * scale;
+
+	// Engine tilt over the whole chart in KSH units (1 = 10 deg), sampled at 120 Hz of song time; cached per edit.
+	tiltTrack() {
+		this._prep();
+		if (this._tt && this._tt.ver === this.ver) return this._tt;
+		const RATE = 120, ed = this.ed;
+		const endT = Math.max(960, (ed.chartEndTick ? ed.chartEndTick() : 0) + 960);
+		const s0 = this.secAt(0) - 1, s1 = this.secAt(endT);
+		const n = Math.max(2, Math.ceil((s1 - s0) * RATE) + 1), v = new Float32Array(n);
+		const st = this._freshSim(s0 - 1.5);
+		const h = 1 / RATE;
+		while (st.sec + h <= s0) this._step(st, st.sec + h, h);
+		for (let k = 0; k < n; k++) { const target = s0 + k * h; if (target > st.sec) this._step(st, target, target - st.sec); v[k] = -st.roll / PV.MAX_ROLL; }
+		this._tt = { ver: this.ver, s0, rate: RATE, v };
+		return this._tt;
+	}
+	tiltAtTick(t) {
+		const tt = this.tiltTrack(), x = (this.secAt(t) - tt.s0) * tt.rate, k = Math.floor(x);
+		if (k < 0) return tt.v[0]; if (k + 1 >= tt.v.length) return tt.v[tt.v.length - 1];
+		return tt.v[k] + (tt.v[k + 1] - tt.v[k]) * (x - k);
+	}
+
+	// Engine tilt in KSH units (1 = 10°, + = clockwise like KSH tilt) sampled from t0 to t1 every `step`
+	// ticks; used for the dashed "auto" ghost in the Tilt column.
+	tiltCurve(t0, t1, step) {
+		this._prep();
+		const out = [];
+		const s0 = this.secAt(Math.max(0, t0));
+		const st = this._freshSim(s0 - 2.5);
+		const h = 1 / 120;
+		for (let t = t0; t <= t1; t += step) {
+			const target = this.secAt(t);
+			while (st.sec + h < target) this._step(st, st.sec + h, h);
+			if (target > st.sec) this._step(st, target, target - st.sec);
+			out.push([t, -st.roll / PV.MAX_ROLL]);
 		}
-		const k = 1 - Math.exp(-dt * 12);
-		this.tiltCur += (target - this.tiltCur) * k;
-		return this.tiltCur;
+		return out;
 	}
 }
+
+</script>
+<script>
+/* ============================================================================
+ * SOUND VOLTEX export: .vox chart (format 10), .2dx audio (MS-ADPCM WAV in a
+ * 2DX container), music_db entry (Shift-JIS XML), jackets, all in one .zip
+ * laid out for data_mods. Mappings follow the user's working pair
+ * (mxm.ksh -> 2811_custom_5m.vox) and the community VOX format notes.
+ * ========================================================================== */
+const SDVX = (() => {
+	const SLOTS = [
+		{ id: 'novice', n: 1, l: 'n', label: '1 NOVICE' }, { id: 'advanced', n: 2, l: 'a', label: '2 ADVANCED' },
+		{ id: 'exhaust', n: 3, l: 'e', label: '3 EXHAUST' }, { id: 'infinite', n: 4, l: 'i', label: '4 INF / GRV / HVN / VVD / XCD' },
+		{ id: 'maximum', n: 5, l: 'm', label: '5 MAXIMUM' }, { id: 'ultimate', n: 6, l: 'u', label: '6 ULTIMATE' },
+	];
+	const KSH_DIFF_SLOT = { light: 'novice', challenge: 'advanced', extended: 'exhaust', infinite: 'maximum' };
+	const pad = (n, w) => String(n).padStart(w, '0');
+	const f2 = (v) => { const s = (Math.round(v * 100) / 100).toFixed(2); return s === '-0.00' ? '0.00' : s; };
+
+	// ---------------------------------------------------------------- VOX
+	// laser filter -> #TAB EFFECT INFO index (0 = built-in peak filter)
+	const FILTER_CODE = { peak: 0, lpf1: 1, hpf1: 3, bitc: 5 };
+	const TAB_EFFECTS = [
+		'1,\t90.00,\t400.00,\t18000.00,\t0.70', '1,\t90.00,\t600.00,\t15000.00,\t5.00',
+		'2,\t90.00,\t40.00,\t5000.00,\t0.70', '2,\t90.00,\t40.00,\t2000.00,\t3.00', '3,\t100.00,\t30'];
+	const SE_CODE = { clap: 3, clap_punchy: 3, clap_impact: 2, snare: 5, snare_lo: 4 };
+	// FX hold effect -> #FXBUTTON EFFECT INFO line
+	function fxLine(e, warn) {
+		const half = (n) => Math.max(1, Math.round(n / 2));
+		switch (e.type) {
+			case 'Retrigger': return `1,\t${half(e.p0)},\t95.00,\t2.00,\t1.00,\t0.85,\t0.15`;
+			case 'Gate': return `2,\t100.00,\t${half(e.p0)},\t1.00`;
+			case 'Phaser': warn('Phaser has no SDVX equivalent; exported as Flanger.');
+			// falls through
+			case 'Flanger': return '3,\t80.00,\t2.00,\t0.50,\t90,\t2.00';
+			case 'TapeStop': return `4,\t100.00,\t8.00,\t${f2(K.clamp(22 / Math.max(1, e.p0), 0.1, 2))}`;
+			case 'SideChain': return '5,\t90.00,\t1.00,\t45,\t50,\t60';
+			case 'Wobble': return `6,\t0,\t1,\t100.00,\t500.00,\t20000.00,\t${f2(Math.max(1, e.p0) / 3)},\t1.41`;
+			case 'BitCrusher': return `7,\t100.00,\t${K.clamp(Math.round(e.p0), 1, 30)}`;
+			case 'Echo': return `8,\t${half(e.p0)},\t100.00,\t2.00,\t${f2(K.clamp(e.p1 / 100, 0.1, 1))},\t0.85,\t0.15,\t0.00`;
+			case 'PitchShift': return `9,\t100.00,\t${f2(e.p0)}`;
+		}
+		return null;
+	}
+
+	function buildVox(chartIn, opts = {}) {
+		const warnings = [];
+		const warn = (msg, t) => { if (!warnings.some(w => w.msg === msg)) warnings.push({ t: t || 0, msg }); };
+		const c = K.toUsc(chartIn, warnings); // no curves, rotation folded into tilt
+		const tm = new K.Timing(c);
+		const edge = opts.laserEdge || 124;
+		const pos = (t) => {
+			t = Math.max(0, Math.round(t / 5) * 5);
+			const ms = tm.measureOf(t), cpb = 192 / ms.d, cells = Math.round((t - ms.start) / 5);
+			const beat = Math.floor(cells / cpb), cell = cells - beat * cpb;
+			return pad(ms.m + 1, 3) + ',' + pad(beat + 1, 2) + ',' + pad(cell, 2);
+		};
+		const cells = (l) => Math.round(l / 5);
+		const L = [];
+		const sec = (name, rows) => { L.push('#' + name, ...rows, '#END', ''); };
+		const sep = () => L.push('//====================================', '');
+		L.push('//====================================', '// SOUND VOLTEX OUTPUT TEXT FILE', '//====================================', '');
+		sec('FORMAT VERSION', ['10']);
+		sec('BEAT INFO', c.sig.map(s => pos(tm.measureStart(s.m)) + '\t' + s.n + '\t' + s.d));
+		// BPM changes; stops become pauses ("4-") that end with the BPM restated
+		const bpmRows = c.bpm.map(b => ({ t: b.t, s: pos(b.t) + '\t' + b.v.toFixed(4) + '\t4' }));
+		for (const st of c.stops) {
+			bpmRows.push({ t: st.t, s: pos(st.t) + '\t' + tm.bpmAt(st.t).toFixed(4) + '\t4-' });
+			bpmRows.push({ t: st.t + st.l, s: pos(st.t + st.l) + '\t' + tm.bpmAt(st.t + st.l).toFixed(4) + '\t4' });
+		}
+		if (c.stops.length) warn('Stops are written as SDVX pauses; check them in game.');
+		sec('BPM INFO', bpmRows.sort((a, b) => a.t - b.t).map(r => r.s));
+		// auto-tilt modes
+		const tiltRows = [];
+		for (const p of c.tilt) {
+			const v = typeof p.v === 'string' ? p.v : null; if (!v) continue;
+			tiltRows.push(pos(p.t) + '\t' + (v.startsWith('keep') ? 2 : /bigger|biggest/.test(v) ? 1 : 0));
+		}
+		sec('TILT MODE INFO', tiltRows);
+		sec('LYRIC INFO', []);
+		let end = 0;
+		for (const l of [...c.bt, ...c.fx]) for (const n of l) end = Math.max(end, n.t + n.l);
+		for (const l of c.laser) for (const s of l) end = Math.max(end, K.sectionEndTick(s));
+		const endM = tm.measureOf(end).m + 2;
+		sec('END POSITION', [pos(tm.measureStart(endM))]);
+		sec('TAB EFFECT INFO', TAB_EFFECTS);
+		// FX hold effects: one pair per hold, in time order (L before R)
+		const defines = KSMFX.parseDefines(c.defs);
+		const holds = [];
+		c.fx.forEach((lane, li) => lane.forEach(n => { if (n.l > 0) holds.push({ n, li }); }));
+		holds.sort((a, b) => a.n.t - b.n.t || a.li - b.li);
+		const pairRows = [], holdIdx = new Map();
+		for (const hd of holds) {
+			const e = hd.n.fx ? KSMFX.parseEffect(hd.n.fx, defines) : null;
+			const line = e ? fxLine(e, warn) : null;
+			if (hd.n.fx && !line) warn('FX effect "' + hd.n.fx + '" has no SDVX equivalent and was left out.', hd.n.t);
+			if (!line) { holdIdx.set(hd.n, 0); continue; }
+			holdIdx.set(hd.n, 2 + pairRows.length / 3);
+			pairRows.push(line, '0,\t0,\t0,\t0,\t0,\t0,\t0', '');
+		}
+		L.push('#FXBUTTON EFFECT INFO', ...pairRows, '#END', '');
+		const assign = []; for (let i = 0; i < 12; i++) assign.push(i + ',\t0,\t0.00,\t0.00', i + ',\t0,\t0.00,\t0.00');
+		sec('TAB PARAM ASSIGN INFO', assign);
+		sec('REVERB EFFECT PARAM', []);
+		L.push('//====================================', '// TRACK INFO', '//====================================', '');
+		// lasers
+		const filterAt = (t) => { const p = K.lastAtOrBefore(c.filterType, t); const v = KSMFX.filterKind(p ? p.v : c.meta.filtertype, defines); return FILTER_CODE[v] ?? 0; };
+		const spinAt = new Map(c.spins.map(s => [s.t, s]));
+		const usedSpins = new Set();
+		const rollCode = (s) => {
+			if (s.kind !== 'spin') return 5; // half spin / swing -> 3-beat swing
+			const beats = 2 * s.l / 240; // SDVX durations include the overshoot: twice the KSH length
+			return [[2, 2], [3, 3], [1, 7]].reduce((best, [code, b]) => Math.abs(b - beats) < Math.abs(best[1] - beats) ? [code, b] : best, [2, 2])[0];
+		};
+		const laserTrack = (lane) => {
+			const rows = [];
+			for (const s of c.laser[lane]) {
+				const range = s.wide ? 2 : 1, last = s.pts.length - 1;
+				const val = (v) => { v = K.clamp(v, 0, 50); return v <= 0 ? 0 : Math.ceil(v * (edge + 1) / 50 - 1e-9) - 1; }; // same as the reference conversion: 1->2, 2->4, 25->62, 47->117, 50->124
+				s.pts.forEach((p, i) => {
+					const t = s.t + p.ry, fc = filterAt(t);
+					if (p.v !== p.vf) {
+						const sp = spinAt.get(t); let roll = 0;
+						if (sp) { roll = rollCode(sp); usedSpins.add(sp); }
+						rows.push(`${pos(t)}\t${val(p.v)}\t${i === 0 ? 1 : 0}\t${roll}\t${fc}\t${range}\t0`);
+						rows.push(`${pos(t)}\t${val(p.vf)}\t${i === last ? 2 : 0}\t0\t${fc}\t${range}\t0`);
+					} else rows.push(`${pos(t)}\t${val(p.v)}\t${i === 0 ? 1 : i === last ? 2 : 0}\t0\t${fc}\t${range}\t0`);
+				});
+			}
+			return rows;
+		};
+		const fxTrack = (lane) => c.fx[lane].map(n => n.l > 0 ? `${pos(n.t)}\t${cells(n.l)}\t${holdIdx.get(n) || 0}` : `${pos(n.t)}\t0\t${n.se ? (SE_CODE[n.se.split(';')[0]] || 0) : 0}`);
+		const btTrack = (lane) => c.bt[lane].map(n => `${pos(n.t)}\t${cells(n.l)}\t0`);
+		const tracks = [laserTrack(0), fxTrack(0), btTrack(0), btTrack(1), btTrack(2), btTrack(3), fxTrack(1), laserTrack(1)];
+		tracks.forEach((rows, i) => { L.push('#TRACK' + (i + 1), ...rows, '#END', ''); sep(); });
+		for (const sp of c.spins) if (!usedSpins.has(sp)) warn('A spin that is not on a slam was left out (SDVX spins start on slams).', sp.t);
+		if (c.fx.some(l => l.some(n => n.l === 0 && n.se && !SE_CODE[n.se.split(';')[0]]))) warn('Custom FX chip sounds (sample files) have no SDVX equivalent and were left out.');
+		L.push('#TRACK AUTO TAB', '#END', '');
+		sep();
+		// SPCONTROLER: camera graphs
+		const sp = ['001,01,00\tRealize\t3\t0\t36.12\t60.12\t110.12\t0.00', '001,01,00\tRealize\t4\t0\t0.62\t0.72\t1.03\t0.00',
+			'001,01,00\tAIRL_ScaX\t1\t0\t0.00\t1.00\t0.00\t0.00', '001,01,00\tAIRR_ScaX\t1\t0\t0.00\t2.00\t0.00\t0.00'];
+		const graph = (name, pts, conv) => {
+			const num = pts.filter(p => typeof p.v === 'number');
+			if (!num.length || num.every(p => p.v === 0 && (p.vf === undefined || p.vf === 0))) return;
+			const first = conv(num[0].v);
+			sp.push(`001,01,00\t${name}\t2\t0\t${f2(first)}\t${f2(first)}\t0.00\t0.00`);
+			if (num[0].t > 0) sp.push(`001,01,00\t${name}\t2\t${cells(num[0].t)}\t${f2(first)}\t${f2(first)}\t0.00\t0.00`);
+			num.forEach((p, i) => {
+				const q = num[i + 1], a = conv(p.v), b = conv(typeof p.vf === 'number' ? p.vf : p.v);
+				if (a !== b) sp.push(`${pos(p.t)}\t${name}\t2\t0\t${f2(a)}\t${f2(b)}\t0.00\t0.00`);
+				if (q) sp.push(`${pos(p.t)}\t${name}\t2\t${cells(q.t - p.t)}\t${f2(b)}\t${f2(conv(q.v))}\t0.00\t0.00`);
+			});
+		};
+		graph('CAM_RotX', c.cam.zoom_top, v => Math.tanh(v / 100));
+		graph('CAM_Radi', c.cam.zoom_bottom, v => -Math.tanh(v / 100));
+		graph('Morphing2', c.cam.center_split, v => v / 100 * 0.75);
+		// manual tilt (vox +1 = ksh -1); tilt=zero spans hold the lane flat
+		const tiltSpans = [];
+		for (let i = 0; i < c.tilt.length; i++) {
+			const p = c.tilt[i], q = c.tilt[i + 1];
+			const after = p.vf !== undefined ? p.vf : p.v;
+			if (typeof p.v === 'number') {
+				const a = -p.v, b = typeof after === 'number' ? -after : -p.v;
+				if (a !== b) tiltSpans.push(`${pos(p.t)}\tTilt\t2\t0\t${f2(a)}\t${f2(b)}\t0.00\t0.00`);
+				if (q && typeof after === 'number') tiltSpans.push(`${pos(p.t)}\tTilt\t2\t${cells(q.t - p.t)}\t${f2(b)}\t${f2(typeof q.v === 'number' ? -q.v : b)}\t0.00\t0.00`);
+			} else if (after === 'zero') {
+				const until = q ? q.t : tm.measureStart(endM);
+				tiltSpans.push(`${pos(p.t)}\tTilt\t2\t${cells(until - p.t)}\t0.00\t0.00\t0.00\t0.00`);
+			}
+		}
+		sp.push(...tiltSpans);
+		if (c.cam.zoom_side.some(p => p.v !== 0 || (p.vf || 0) !== 0)) warn('SDVX has no sideways lane shift: Zoom Side (and slam kicks) are left out.');
+		if (c.cam.scroll_speed.length) warn('scroll_speed is not exported to SDVX.');
+		if (chartIn.cam.center_split.length) warn('center_split is exported as SDVX lane split (Morphing2); the amount is approximate.');
+		if (chartIn.pfilterGain.length) warn('pfiltergain changes are not exported (SDVX laser effects have fixed strength).');
+		L.push('#SPCONTROLER', ...sp, '#END', '');
+		sep();
+		return { text: L.join('\n'), warnings };
+	}
+
+	// ---------------------------------------------------------------- MS-ADPCM WAV + 2DX
+	const ADAPT = [230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230];
+	const COEF1 = [256, 512, 0, 192, 240, 460, 392], COEF2 = [0, -256, 0, 64, 0, -208, -232];
+	const BLOCK = 1024, SPB = 1012;
+	const s16 = (v) => v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+	// encode one channel's block with a given predictor and starting step; returns {pred, delta, s1, s2, nib, err}
+	function encBlock(x, off, pred, delta0, keep) {
+		const c1 = COEF1[pred], c2 = COEF2[pred];
+		const x0 = x[off], x1 = x[off + 1];
+		let s2 = x0, s1 = x1, delta = delta0; // header: sample2 is played first
+		const nib = keep ? new Int8Array(SPB - 2) : null;
+		let err = 0;
+		for (let k = 2; k < SPB; k++) {
+			const xs = x[off + k];
+			const p = (s1 * c1 + s2 * c2) >> 8;
+			let code = Math.round((xs - p) / delta);
+			code = code < -8 ? -8 : code > 7 ? 7 : code;
+			const y = s16(p + code * delta);
+			err += (xs - y) * (xs - y);
+			if (nib) nib[k - 2] = code;
+			delta = (delta * ADAPT[code & 15]) >> 8; if (delta < 16) delta = 16;
+			s2 = s1; s1 = y;
+		}
+		return { pred, delta: delta0, s1: x1, s2: x0, nib, err };
+	}
+	// pick the predictor / starting step with the smallest error over the whole block
+	function bestBlock(x, off) {
+		let d = 0; for (let k = 2; k < 18; k++) d += Math.abs(x[off + k] - x[off + k - 1]);
+		const base = Math.max(16, Math.round(d / 16));
+		let bp = 0, be = Infinity;
+		for (let p = 0; p < 7; p++) { const r = encBlock(x, off, p, base, false); if (r.err < be) { be = r.err; bp = p; } }
+		let bd = base;
+		for (const m of [0.35, 0.6, 1.7, 3]) {
+			const dl = Math.min(32767, Math.max(16, Math.round(base * m)));
+			const r = encBlock(x, off, bp, dl, false); if (r.err < be) { be = r.err; bd = dl; }
+		}
+		return encBlock(x, off, bp, bd, true);
+	}
+	function encodeAdpcmWav(left, right, sr) {
+		const n = left.length, nb = Math.max(1, Math.ceil(n / SPB));
+		const toI = (f) => { const a = new Int16Array(nb * SPB); for (let i = 0; i < n; i++) { const v = f[i]; a[i] = v >= 1 ? 32767 : v <= -1 ? -32768 : Math.round(v * 32767); } return a; };
+		const L16 = toI(left), R16 = toI(right);
+		const out = new Uint8Array(nb * BLOCK), dv = new DataView(out.buffer);
+		for (let b = 0; b < nb; b++) {
+			const off = b * SPB, base = b * BLOCK;
+			const enc = [bestBlock(L16, off), bestBlock(R16, off)];
+			out[base] = enc[0].pred; out[base + 1] = enc[1].pred;
+			dv.setInt16(base + 2, enc[0].delta, true); dv.setInt16(base + 4, enc[1].delta, true);
+			dv.setInt16(base + 6, enc[0].s1, true); dv.setInt16(base + 8, enc[1].s1, true);
+			dv.setInt16(base + 10, enc[0].s2, true); dv.setInt16(base + 12, enc[1].s2, true);
+			for (let k = 0; k < SPB - 2; k++) out[base + 14 + k] = ((enc[0].nib[k] & 15) << 4) | (enc[1].nib[k] & 15);
+		}
+		// RIFF: fmt (MS ADPCM, 7 coefficients), fact, LIST/INFO, data -- same layout as the game's own files
+		const fmt = new Uint8Array(50), fv = new DataView(fmt.buffer);
+		fv.setUint16(0, 2, true); fv.setUint16(2, 2, true); fv.setUint32(4, sr, true); fv.setUint32(8, 16000, true);
+		fv.setUint16(12, BLOCK, true); fv.setUint16(14, 4, true); fv.setUint16(16, 32, true); fv.setUint16(18, SPB, true); fv.setUint16(20, 7, true);
+		for (let i = 0; i < 7; i++) { fv.setInt16(22 + i * 4, COEF1[i], true); fv.setInt16(24 + i * 4, COEF2[i], true); }
+		const info = new TextEncoder().encode('INFOISFT\x0e\x00\x00\x00Lavf58.76.100\x00');
+		const chunks = [['fmt ', fmt], ['fact', new Uint8Array(new Uint32Array([nb * SPB]).buffer)], ['LIST', info], ['data', out]];
+		let size = 4; for (const [, d] of chunks) size += 8 + d.length + (d.length & 1);
+		const wav = new Uint8Array(8 + size), wv = new DataView(wav.buffer);
+		const str = (o, s) => { for (let i = 0; i < s.length; i++) wav[o + i] = s.charCodeAt(i); };
+		str(0, 'RIFF'); wv.setUint32(4, size, true); str(8, 'WAVE');
+		let p = 12;
+		for (const [id, d] of chunks) { str(p, id); wv.setUint32(p + 4, d.length, true); wav.set(d, p + 8); p += 8 + d.length + (d.length & 1); }
+		return wav;
+	}
+	// decoder (used by tests and to double-check output)
+	function decodeAdpcmWav(wav) {
+		const dv = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
+		let p = 12, data = null, ch = 2, ba = BLOCK, spb = SPB;
+		while (p + 8 <= wav.length) {
+			const id = String.fromCharCode(...wav.subarray(p, p + 4)), sz = dv.getUint32(p + 4, true);
+			if (id === 'fmt ') { ch = dv.getUint16(p + 10, true); ba = dv.getUint16(p + 20, true); spb = dv.getUint16(p + 26, true); }
+			if (id === 'data') data = wav.subarray(p + 8, p + 8 + sz);
+			p += 8 + sz + (sz & 1);
+		}
+		const nb = Math.floor(data.length / ba), outs = [new Float32Array(nb * spb), new Float32Array(nb * spb)];
+		const dd = new DataView(data.buffer, data.byteOffset, data.byteLength);
+		for (let b = 0; b < nb; b++) {
+			const o = b * ba, st = [];
+			for (let c = 0; c < ch; c++) st.push({ pr: data[o + c], d: dd.getInt16(o + ch + c * 2, true), s1: dd.getInt16(o + ch * 3 + c * 2, true), s2: dd.getInt16(o + ch * 5 + c * 2, true) });
+			for (let c = 0; c < ch; c++) { outs[c][b * spb] = st[c].s2 / 32768; outs[c][b * spb + 1] = st[c].s1 / 32768; }
+			let k = 2;
+			for (let i = o + ch * 7; i < o + ba; i++) {
+				const nibs = [data[i] >> 4, data[i] & 15];
+				for (let j = 0; j < 2; j++) {
+					const c = ch === 2 ? j : 0, s = st[c]; let nb4 = nibs[j]; const code = nb4 >= 8 ? nb4 - 16 : nb4;
+					const pr = (s.s1 * COEF1[s.pr] + s.s2 * COEF2[s.pr]) >> 8;
+					const y = s16(pr + code * s.d);
+					s.d = Math.max(16, (s.d * ADAPT[nb4]) >> 8); s.s2 = s.s1; s.s1 = y;
+					outs[c][b * spb + k] = y / 32768;
+					if (ch === 1 || j === 1) k++;
+				}
+			}
+		}
+		return { left: outs[0], right: outs[1], samples: nb * spb };
+	}
+	function make2dx(name, wav) {
+		const head = 72 + 4, out = new Uint8Array(head + 24 + wav.length), dv = new DataView(out.buffer);
+		const nm = new TextEncoder().encode(name).subarray(0, 16); out.set(nm, 0);
+		dv.setUint32(16, head, true); dv.setUint32(20, 1, true); dv.setUint32(72, head, true);
+		out.set([0x32, 0x44, 0x58, 0x39], head); // "2DX9"
+		dv.setUint32(head + 4, 24, true); dv.setUint32(head + 8, wav.length, true);
+		out.set([0x31, 0x32, 0xff, 0xff, 0x40, 0, 0, 0, 0, 0, 0, 0], head + 12);
+		out.set(wav, head + 24);
+		return out;
+	}
+	// cut [start, start+len) seconds of an AudioBuffer (negative start pads with silence), optional fades
+	function sliceAudio(buf, start, len, fadeIn, fadeOut) {
+		const sr = buf.sampleRate, n = Math.max(1, Math.round(len * sr)), s0 = Math.round(start * sr);
+		const outs = [new Float32Array(n), new Float32Array(n)];
+		for (let c = 0; c < 2; c++) {
+			const src = buf.getChannelData(Math.min(c, buf.numberOfChannels - 1)), o = outs[c];
+			for (let i = 0; i < n; i++) { const k = s0 + i; o[i] = k >= 0 && k < src.length ? src[k] : 0; }
+			const fi = Math.round((fadeIn || 0) * sr), fo = Math.round((fadeOut || 0) * sr);
+			for (let i = 0; i < fi && i < n; i++) o[i] *= i / fi;
+			for (let i = 0; i < fo && i < n; i++) o[n - 1 - i] *= i / fo;
+		}
+		return outs;
+	}
+
+	// ---------------------------------------------------------------- Shift-JIS, music_db
+	let SJIS = null;
+	function sjisEncode(str, bad) {
+		if (!SJIS) {
+			SJIS = new Map();
+			const dec = new TextDecoder('shift_jis');
+			for (let b = 0xa1; b <= 0xdf; b++) SJIS.set(dec.decode(new Uint8Array([b])), [b]);
+			for (let lead = 0x81; lead <= 0xfc; lead++) {
+				if (lead > 0x9f && lead < 0xe0) continue;
+				for (let tr = 0x40; tr <= 0xfc; tr++) {
+					if (tr === 0x7f) continue;
+					const ch = dec.decode(new Uint8Array([lead, tr]));
+					if (ch.length === 1 && ch !== '�' && !SJIS.has(ch)) SJIS.set(ch, [lead, tr]);
+				}
+			}
+		}
+		const out = [];
+		for (const ch of str) {
+			const cp = ch.codePointAt(0);
+			if (cp < 0x80) { out.push(cp); continue; }
+			const m = SJIS.get(ch);
+			if (m) out.push(...m); else { out.push(0x3f); if (bad) bad.add(ch); }
+		}
+		return new Uint8Array(out);
+	}
+	const xmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	function musicDb(o) {
+		const T = (name, v, type) => `<${name}${type ? ` __type="${type}"` : ''}>${xmlEsc(v)}</${name}>`;
+		const charts = SLOTS.map(sl => {
+			const on = sl.id === o.slot;
+			return `      <${sl.id}>\n` + [
+				T('difnum', on ? o.difnum : 0, 'u8'), T('illustrator', on ? o.illustrator : ''), T('effected_by', on ? o.effector : ''),
+				T('price', -1, 's32'), T('limited', 3, 'u8'), T('jacket_print', -2, 's32'), T('jacket_mask', 0, 's32'), T('max_exscore', 0, 's32'),
+			].map(x => '        ' + x).join('\n') + '\n        <radar>\n' + ['notes', 'peak', 'tsumami', 'tricky', 'hand_trip', 'one_hand'].map(k => '          ' + T(k, 0, 'u16')).join('\n') + `\n        </radar>\n      </${sl.id}>`;
+		}).join('\n');
+		const info = [
+			T('title_name', o.title), T('title_yomigana', o.titleYomi || o.title), T('artist_name', o.artist), T('artist_yomigana', o.artistYomi || o.artist),
+			T('ascii', o.ascii), T('bpm_max', Math.round(o.bpmMax * 100), 'u32'), T('bpm_min', Math.round(o.bpmMin * 100), 'u32'),
+			T('distribution_date', o.date, 'u32'), T('volume', o.volume, 'u16'), T('bg_no', o.bgNo ?? 2, 'u16'), T('genre', 0, 'u32'),
+			T('is_fixed', 1, 'u8'), T('version', o.version, 'u8'), T('demo_pri', 0, 's8'), T('inf_ver', o.infVer, 'u8'),
+		].map(x => '      ' + x).join('\n');
+		return `<?xml version="1.0" encoding="shift-jis"?>\n<mdb>\n  <music id="${o.id}">\n    <info>\n${info}\n    </info>\n    <difficulty>\n${charts}\n    </difficulty>\n  </music>\n</mdb>\n`;
+	}
+
+	// ---------------------------------------------------------------- zip (store only)
+	let CRC = null;
+	function crc32(d) {
+		if (!CRC) { CRC = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; CRC[n] = c >>> 0; } }
+		let c = 0xffffffff; for (let i = 0; i < d.length; i++) c = CRC[(c ^ d[i]) & 255] ^ (c >>> 8);
+		return (c ^ 0xffffffff) >>> 0;
+	}
+	function zip(files) { // [{name, data: Uint8Array}]
+		const enc = new TextEncoder(), parts = [], central = [];
+		let off = 0;
+		const now = new Date(), dt = ((now.getFullYear() - 1980) << 25) | ((now.getMonth() + 1) << 21) | (now.getDate() << 16) | (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+		for (const f of files) {
+			const nm = enc.encode(f.name), crc = crc32(f.data);
+			const h = new Uint8Array(30 + nm.length), v = new DataView(h.buffer);
+			v.setUint32(0, 0x04034b50, true); v.setUint16(4, 20, true); v.setUint16(6, 0x0800, true); v.setUint16(8, 0, true);
+			v.setUint32(10, dt, true); v.setUint32(14, crc, true); v.setUint32(18, f.data.length, true); v.setUint32(22, f.data.length, true);
+			v.setUint16(26, nm.length, true); h.set(nm, 30);
+			const cd = new Uint8Array(46 + nm.length), w = new DataView(cd.buffer);
+			w.setUint32(0, 0x02014b50, true); w.setUint16(4, 20, true); w.setUint16(6, 20, true); w.setUint16(8, 0x0800, true);
+			w.setUint32(12, dt, true); w.setUint32(16, crc, true); w.setUint32(20, f.data.length, true); w.setUint32(24, f.data.length, true);
+			w.setUint16(28, nm.length, true); w.setUint32(42, off, true); cd.set(nm, 46);
+			parts.push(h, f.data); central.push(cd); off += h.length + f.data.length;
+		}
+		const cdSize = central.reduce((a, b) => a + b.length, 0);
+		const e = new Uint8Array(22), ev = new DataView(e.buffer);
+		ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, files.length, true); ev.setUint16(10, files.length, true);
+		ev.setUint32(12, cdSize, true); ev.setUint32(16, off, true);
+		return new Blob([...parts, ...central, e], { type: 'application/zip' });
+	}
+
+	// ---------------------------------------------------------------- package
+	async function jacketPngs(file, sizes) {
+		const img = await createImageBitmap(file);
+		const out = {};
+		for (const [key, s] of Object.entries(sizes)) {
+			const cv = document.createElement('canvas'); cv.width = s; cv.height = s;
+			const g = cv.getContext('2d'); g.imageSmoothingQuality = 'high';
+			const m = Math.min(img.width, img.height); g.drawImage(img, (img.width - m) / 2, (img.height - m) / 2, m, m, 0, 0, s, s);
+			const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+			out[key] = new Uint8Array(await blob.arrayBuffer());
+		}
+		return out;
+	}
+	// o: {id, ascii, slot, difnum, version, infVer, volume, laserEdge, title, artist, titleYomi, artistYomi, illustrator, effector, jacket(File), audioBytes(ArrayBuffer), offsetMs, previewMs, previewLen, bpmMin, bpmMax}
+	async function buildPackage(chart, o, progress) {
+		const files = [], warnings = [];
+		const stem = pad(o.id, 4) + '_' + o.ascii, slot = SLOTS.find(s => s.id === o.slot), dir = o.ascii + '/music/' + stem + '/';
+		const vox = buildVox(chart, { laserEdge: o.laserEdge });
+		warnings.push(...vox.warnings);
+		files.push({ name: dir + stem + '_' + slot.n + slot.l + '.vox', data: new TextEncoder().encode(vox.text) });
+		if (o.audioBytes) {
+			progress && progress('Decoding audio at 44.1 kHz…');
+			const ac = new OfflineAudioContext(2, 44100, 44100);
+			const buf = await ac.decodeAudioData(o.audioBytes.slice(0));
+			const start = (o.offsetMs || 0) / 1000;
+			progress && progress('Encoding song (MS-ADPCM)…'); await new Promise(r => setTimeout(r, 30));
+			const [l, r] = sliceAudio(buf, start, buf.duration - start, 0, 0);
+			files.push({ name: dir + stem + '.2dx', data: make2dx(stem + '.2dx', encodeAdpcmWav(l, r, 44100)) });
+			progress && progress('Encoding preview…'); await new Promise(r2 => setTimeout(r2, 30));
+			const pl = (o.previewLen > 0 ? o.previewLen : 15000) / 1000;
+			const [pl0, pr0] = sliceAudio(buf, (o.previewMs || 0) / 1000, pl, 0.3, 1.5);
+			files.push({ name: dir + stem + '_pre.2dx', data: make2dx(stem + '_pre.2dx', encodeAdpcmWav(pl0, pr0, 44100)) });
+		} else warnings.push({ t: 0, msg: 'No audio loaded: the .2dx files were not created.' });
+		if (o.jacket) {
+			progress && progress('Making jackets…');
+			const j = await jacketPngs(o.jacket, { n: 300, s: 108, b: 676, t: 128 });
+			const jb = 'jk_' + pad(o.id, 4) + '_' + slot.n;
+			files.push({ name: dir + jb + '.png', data: j.n }, { name: dir + jb + '_s.png', data: j.s }, { name: dir + jb + '_b.png', data: j.b });
+			files.push({ name: o.ascii + '/graphics/s_jacket00_ifs/' + jb + '_t.png', data: j.t });
+		} else warnings.push({ t: 0, msg: 'No jacket image chosen: the game will show a blank jacket.' });
+		const bad = new Set();
+		const db = sjisEncode(musicDb({ ...o, date: o.date || Number(new Date().toISOString().slice(0, 10).replace(/-/g, '')) }), bad);
+		if (bad.size) warnings.push({ t: 0, msg: 'These characters cannot be written in Shift-JIS and became "?": ' + [...bad].join(' ') });
+		files.push({ name: o.ascii + '/others/music_db.merged.xml', data: db });
+		files.push({ name: o.ascii + '/README.txt', data: new TextEncoder().encode(
+			'Copy the "' + o.ascii + '" folder into your game\'s data_mods folder (LayeredFS).\r\n' +
+			'Song id ' + o.id + ', chart slot ' + slot.label + '.\r\n' +
+			'others/music_db.merged.xml holds this song\'s entry; if your setup merges music_db files by hand, add the <music> element to your music_db.xml.\r\n\r\n' +
+			(warnings.length ? 'Notes from the export:\r\n' + warnings.map(w => '- ' + w.msg).join('\r\n') + '\r\n' : '')) });
+		return { blob: zip(files), files, warnings };
+	}
+
+	return { SLOTS, KSH_DIFF_SLOT, buildVox, encodeAdpcmWav, decodeAdpcmWav, make2dx, sliceAudio, sjisEncode, musicDb, zip, crc32, buildPackage };
+})();
+if (typeof module !== 'undefined' && module.exports) module.exports = SDVX;
 
 </script>
 <script>
@@ -1990,9 +3227,33 @@ const DIVS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 192];
 const LASER_SNAPS = [{ v: 1, label: '51 (fine)' }, { v: 5, label: '11 (1/10)' }, { v: 10, label: '6 (1/5)' }, { v: 25, label: '3 (1/2)' }];
 const CAM_STEP = { zoom_top: 5, zoom_bottom: 5, zoom_side: 5, center_split: 5, rotation_deg: 5, scroll_speed: 0.05, tilt: 0.05 };
 
+// chart event lists that live in the timing column (besides BPM / beat / stop)
+const EV_KEYS = ['filterType', 'pfilterGain', 'slamVol', 'slamSE', 'raw'];
+// Plain-language explanations shown in tooltips, popovers and the Properties panel
+const EVENT_HELP = {
+	bpm: { title: 'BPM change', ksh: 't=', short: 'Tempo from this point on. Changes how fast the chart scrolls and where beats fall.' },
+	sig: { title: 'Time signature', ksh: 'beat=n/d', short: 'Measure length from this measure on (4/4 = four quarter notes).' },
+	stops: { title: 'Stop', ksh: 'stop=', short: 'The lane stops scrolling for this long while the music keeps playing (notes freeze in place).' },
+	spins: { title: 'Lane spin / swing', ksh: '@( @) @< @> S< S>', short: 'Spins the whole lane (full or half turn) or swings it sideways. Normally put on a slam.' },
+	filterType: { title: 'Laser effect', ksh: 'filtertype=', short: 'The sound effect lasers put on the music while a laser is active: peak = peaking filter (default), lpf1 = low-pass (muffled), hpf1 = high-pass (thin), bitc = bitcrusher (crunchy). The effect grows as the knob moves away from its start side. Lasts until the next change.' },
+	pfilterGain: { title: 'Laser effect strength', ksh: 'pfiltergain=', short: 'How strong the laser effect is, 0–100 (50 is the usual default). 0 makes lasers silent. Lasts until the next change.' },
+	slamVol: { title: 'Slam volume', ksh: 'chokkakuvol=', short: 'Volume of the slam sound from here on, 0–100. The starting volume is set in the Chart tab.' },
+	slamSE: { title: 'Slam sound', ksh: 'chokkakuse=', short: 'Which sound the slam on this line makes: up, down, swing or mute.' },
+	raw: { title: 'Other KSH line', ksh: '', short: 'A line kept as-is from the .ksh (an option this editor does not edit, or a comment). It is saved back unchanged.' },
+	zoom_top: { title: 'Zoom Top', ksh: 'zoom_top=', short: 'Tips the lane forward or back around the judgment line (camera pitch). + stands the lane up (far end higher), − lays it flatter. Big values flip it over.' },
+	zoom_bottom: { title: 'Zoom Bottom', ksh: 'zoom_bottom=', short: 'Moves the camera toward (+, lane gets bigger) or away from (−, smaller) the lane.' },
+	zoom_side: { title: 'Zoom Side', ksh: 'zoom_side=', short: 'Shifts the lane sideways: + right, − left. Slam kicks are made of these.' },
+	tilt: { title: 'Tilt', ksh: 'tilt=', short: 'Numbers tilt the lane by hand: 1 = 10°, + = clockwise. Words set the game\'s automatic laser tilt: normal / bigger / biggest, keep_* (hold the tilt until it grows), zero (off). The dashed line shows the tilt the game will actually apply.' },
+	rotation_deg: { title: 'Rotation', ksh: 'rotation_deg=', short: 'Extra lane rotation in degrees around the far end of the lane (KSM v2 only; USC export turns it into tilt).' },
+	center_split: { title: 'Center split', ksh: 'center_split=', short: 'Splits the lane down the middle and moves the halves apart.' },
+	scroll_speed: { title: 'Scroll speed', ksh: 'scroll_speed=', short: 'Multiplies the scroll speed: 1 = normal, 0 = notes stand still, negative = notes scroll backwards (KSM v2).' },
+};
+
 const DEFAULT_SETTINGS = {
-	laneW: 42, showWave: true, showPreview: true, previewBeats: 5, rate: 1, follow: true,
-	volMusic: 0.8, volHit: 0.55, volMetro: 0, hitsounds: true, latencyMs: 0, autosave: true, placeSound: false,
+	laneW: 42, showWave: true, showPreview: true, rate: 1, follow: true,
+	speedMode: 'mod', modSpeed: 800, hiSpeed: 5, drawOffsetMs: 0, previewW: 340,
+	autoKick: true, kickAmount: 30, kickLen: 120, showTiltGhost: true,
+	volMusic: 0.8, volHit: 0.55, volGame: 0.7, volMetro: 0, hitsounds: true, gameSounds: true, playFx: true, latencyMs: 0, autosave: true, placeSound: false,
 	cols: { zoom_top: true, zoom_bottom: true, zoom_side: true, tilt: true, rotation_deg: true, center_split: false, scroll_speed: false },
 };
 
@@ -2022,7 +3283,8 @@ class Editor {
 	saveSettings() { saveJSON('ksmed.settings', this.settings); }
 	applyAudioSettings() {
 		const s = this.settings;
-		this.audio.vol = { music: s.volMusic, hit: s.hitsounds ? s.volHit : 0, metro: s.volMetro };
+		this.audio.vol = { music: s.volMusic, hit: s.volHit, game: s.volGame ?? 0.7, metro: s.volMetro };
+		this.audio.setFxEnabled(s.playFx !== false);
 		this.audio.userLatency = (s.latencyMs || 0) / 1000;
 		this.audio.applyVolumes();
 	}
@@ -2035,6 +3297,11 @@ class Editor {
 	begin() { if (!this._snap) this._snap = K.cloneChart(this.chart); }
 	commit(label) {
 		if (!this._snap) return;
+		if (this.settings.autoKick && /^(Laser|Laser slam|Extend laser|Move laser point|Make slam|Slam end)$/.test(label)) {
+			const before = new Set(); this._snap.laser.forEach((lane, li) => lane.forEach(sc => sc.pts.forEach(p => { if (p.v !== p.vf) before.add(li + ':' + (sc.t + p.ry)); })));
+			const fresh = this.slamList(this.chart).filter(sl => !before.has(sl.lane + ':' + sl.t));
+			if (fresh.length) this.addSlamKicks(this.chart, fresh);
+		}
 		this.undoStack.push({ chart: this._snap, sel: [...this.sel], label });
 		if (this.undoStack.length > 400) this.undoStack.shift();
 		this.redoStack = [];
@@ -2071,6 +3338,88 @@ class Editor {
 		this.emit('select'); this.emit('loaded');
 	}
 
+	// ---------------------------------------------------------------- slam kicks / per-laser engine settings
+	slamList(c, ids) { // [{t, lane, dir, id}] sorted
+		const out = [];
+		c.laser.forEach((lane, li) => lane.forEach(sc => sc.pts.forEach(p => {
+			if (p.v === p.vf || (ids && !ids.has(p.id))) return;
+			out.push({ t: sc.t + p.ry, lane: li, dir: Math.sign(K.laserPos(p.vf, sc.wide) - K.laserPos(p.v, sc.wide)), id: p.id });
+		})));
+		return out.sort((a, b) => a.t - b.t);
+	}
+	// zoom_side "kick" keyframes: jump by +-amount at the slam (in the slam's direction), ease back over len ticks
+	addSlamKicks(c, slams, amount, len) {
+		amount = amount ?? (this.settings.kickAmount || 30); len = len ?? (this.settings.kickLen || 120);
+		const arr = c.cam.zoom_side.slice(), mine = new Set();
+		const out = K.CURVE_PRESETS.find(p => p.id === 'out');
+		// one kick per tick (two lanes slamming together: use the bigger/first direction)
+		const byT = new Map(); for (const sl of slams) if (!byT.has(sl.t)) byT.set(sl.t, sl);
+		const list = [...byT.values()].sort((a, b) => a.t - b.t);
+		const allSlamT = this.slamList(c).map(x => x.t);
+		let added = 0;
+		for (const sl of list) {
+			const t = sl.t;
+			const nextSlam = allSlamT.find(x => x > t);
+			const end = Math.min(t + len, nextSlam ?? Infinity);
+			const at = arr.findIndex(p => p.t === t);
+			const foreign = arr.some(p => p.t > t && p.t <= end && !mine.has(p.id)) || (at >= 0 && !mine.has(arr[at].id));
+			if (foreign || !sl.dir) continue;
+			const base = at >= 0 ? (typeof arr[at].v === 'number' ? arr[at].v : 0) : K.graphValueAt(arr, t, 0);
+			const kick = { id: at >= 0 ? arr[at].id : K.nid(), t, v: base, vf: base + sl.dir * amount, a: out.a, b: out.b };
+			if (at >= 0) arr[at] = kick; else K.insertSorted(arr, kick);
+			mine.add(kick.id);
+			if (!arr.some(p => p.t === end)) { const r = { id: K.nid(), t: end, v: base, a: 0, b: 0 }; K.insertSorted(arr, r); mine.add(r.id); }
+			added++;
+		}
+		c.cam.zoom_side = arr;
+		return added;
+	}
+	// remove kicks made by addSlamKicks: a keyframe on a slam that jumps and comes back to its value
+	removeSlamKicks(c, slams) {
+		const arr = c.cam.zoom_side; const drop = new Set();
+		for (const sl of slams) {
+			const i = arr.findIndex(p => p.t === sl.t);
+			if (i < 0) continue;
+			const p = arr[i], q = arr[i + 1];
+			if (typeof p.vf !== 'number' || p.vf === p.v) continue;
+			drop.add(p.id);
+			if (q && q.v === p.v && q.vf === undefined && !this.slamList(c).some(x => x.t === q.t)) drop.add(q.id);
+			else if (q && q.v === p.v) { /* the next kick starts here: keep it */ }
+		}
+		c.cam.zoom_side = arr.filter(p => !drop.has(p.id));
+		return drop.size;
+	}
+	// engine tilt for the span of one laser: writes tilt=<mode> at its start and restores the previous auto mode at its end
+	laserTiltMode(sc) {
+		const c = this.chart, end = K.sectionEndTick(sc);
+		const at = c.tilt.find(p => p.t === sc.t && typeof p.v === 'string');
+		if (!at) return 'inherit';
+		return at.v;
+	}
+	setLaserTiltMode(sc, mode) {
+		this.edit('Laser tilt', c => {
+			const end = K.sectionEndTick(sc);
+			let arr = c.tilt.filter(p => !(typeof p.v === 'string' && (p.t === sc.t || p.t === end)));
+			const prev = K.lastAtOrBefore(arr, sc.t - 1);
+			const prevMode = prev && typeof prev.v === 'string' ? prev.v : prev ? null : 'normal';
+			if (mode !== 'inherit') {
+				if (arr.some(p => p.t > sc.t && p.t < end)) toast('There are tilt keyframes inside this laser; they still apply');
+				K.insertSorted(arr, { id: K.nid(), t: sc.t, v: mode, a: 0, b: 0 });
+				if (prevMode && prevMode !== mode && !arr.some(p => p.t === end)) K.insertSorted(arr, { id: K.nid(), t: end, v: prevMode, a: 0, b: 0 });
+			}
+			c.tilt = arr;
+		});
+	}
+	// value of a step event list (filterType / pfilterGain) at a tick, or the header default
+	stepAt(list, t, def) { const p = K.lastAtOrBefore(list, t); return p ? p.v : def; }
+	setStepAt(key, t, v, label) {
+		this.edit(label, c => {
+			let arr = c[key].filter(p => p.t !== t);
+			if (v !== null && v !== undefined && v !== '') K.insertSorted(arr, { id: K.nid(), t, v: String(v) });
+			c[key] = arr;
+		});
+	}
+
 	// ---------------------------------------------------------------- lookup
 	index() {
 		if (this._idxVer === this.version && this._idx) return this._idx;
@@ -2087,6 +3436,7 @@ class Editor {
 		c.stops.forEach(b => m.set(b.id, { kind: 'stop', item: b }));
 		c.sig.forEach(b => m.set(b.id, { kind: 'sig', item: b }));
 		c.spins.forEach(b => m.set(b.id, { kind: 'spin', item: b }));
+		for (const key of EV_KEYS) c[key].forEach(e => m.set(e.id, { kind: 'ev', key, item: e }));
 		this._idx = m; this._idxVer = this.version;
 		return m;
 	}
@@ -2170,6 +3520,8 @@ class Editor {
 	}
 	hitTiming(x, y) {
 		const tv = this.tl, c = this.chart;
+		const hs = tv.timingHits || [];
+		for (let i = hs.length - 1; i >= 0; i--) { const r = hs[i]; if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) return r; }
 		const near = (t) => Math.abs(tv.yOf(t) - (y + 6)) <= 9 || Math.abs(tv.yOf(t) - y) <= 6;
 		for (const b of c.bpm) if (near(b.t)) return { kind: 'bpm', item: b };
 		for (const s of c.sig) if (near(this.timing.measureStart(s.m))) return { kind: 'sig', item: s };
@@ -2204,8 +3556,10 @@ class Editor {
 			if (h) {
 				this.setSel([h.item.id], shift || ctrl);
 				if (dbl) { this.editTimingItem(h, e.clientX, e.clientY); return; }
-				if (h.kind !== 'sig' && !(h.kind === 'bpm' && h.item.t === 0)) this.startDrag({ type: 'tmove', hit: h, t0: h.item.t, y0: y });
-			} else this.addTimingPopover(this.snapT(t, alt), e.clientX, e.clientY);
+				if (shift || ctrl) { this.toggleSel([h.item.id]); return; }
+				if (!this.sel.has(h.item.id)) this.setSel([h.item.id]);
+				if (h.kind !== 'sig' && !(h.kind === 'bpm' && h.item.t === 0)) this.startDrag({ type: 'move', x0: x, y0: y, anchor: { kind: 'timing' }, alt });
+			} else this.drag = { type: 'tpending', x0: x, y0: y, t: this.snapT(t, alt), cx: e.clientX, cy: e.clientY, add: shift || ctrl, base: new Set(this.sel) };
 			return;
 		}
 		if (reg.kind === 'cam') {
@@ -2316,6 +3670,7 @@ class Editor {
 		const t = tv.tickAt(y), alt = e.altKey;
 		switch (d.type) {
 			case 'pan': tv.bottomTick = d.b0 + (y - d.y0) / tv.ppt; break;
+			case 'tpending': if (Math.abs(x - d.x0) + Math.abs(y - d.y0) > 5) { this.drag = { type: 'marquee', x0: d.x0, y0: d.y0, x1: x, y1: y, add: d.add, base: d.base }; if (!d.add) this.sel = new Set(); } break;
 			case 'scrub': this.scrubTo(t, alt); break;
 			case 'marquee': {
 				d.x1 = x; d.y1 = y;
@@ -2342,6 +3697,7 @@ class Editor {
 			case 'lnew': this.commitLaserNew(d); break;
 			case 'lextend': this.commitLaserExtend(d); break;
 			case 'marquee': this.emit('select'); break;
+			case 'tpending': this.addTimingPopover(d.t, d.cx, d.cy); break;
 			case 'move': case 'resize': case 'lmove': case 'cmove': case 'tmove':
 				if (d.moved || d.created || d.label) this.commit(d.label || ({ move: 'Move', resize: 'Resize hold', lmove: 'Move laser point', cmove: 'Move keyframe', tmove: 'Move timing event' })[d.type]);
 				else this.cancelSnapOnly();
@@ -2379,6 +3735,12 @@ class Editor {
 		else if (reg.kind === 'track' && this.tool !== 'select') cur = 'crosshair';
 		else if (reg.kind === 'cam' || reg.kind === 'timing') cur = 'cell';
 		this.tl.cv.style.cursor = cur;
+		// native tooltip with a plain explanation of what is under the mouse
+		let help = '';
+		const H = (k) => EVENT_HELP[k] ? EVENT_HELP[k].title + (EVENT_HELP[k].ksh ? ' (' + EVENT_HELP[k].ksh + ')' : '') + ': ' + EVENT_HELP[k].short : '';
+		if (h) help = h.kind === 'ev' ? H(h.key) : h.kind === 'cam' ? H(h.key) : h.kind === 'bpm' ? H('bpm') : h.kind === 'sig' ? H('sig') : h.kind === 'stop' ? H('stops') : h.kind === 'spin' ? H('spins') : '';
+		else if (m.y < tv.HEAD) help = reg.kind === 'cam' ? H(reg.key) : reg.kind === 'timing' ? 'Timing column: BPM, time signatures, stops, laser effect / strength, slam volume and other KSH lines. Click empty space to add one, drag to box-select, double-click an item to edit it.' : '';
+		if (this.tl.cv.title !== help) this.tl.cv.title = help;
 	}
 	updateGhost() {
 		const d = this.drag, tv = this.tl, m = this.mouse;
@@ -2471,7 +3833,9 @@ class Editor {
 			if (col.r < x0 || col.l > x1) continue;
 			for (const p of this.camArr(col.key)) if (p.t >= tA && p.t <= tB) ids.push(p.id);
 		}
-		return ids;
+		for (const r of tv.timingHits || []) if (r.x1 >= x0 && r.x0 <= x1 && r.y1 >= y0 && r.y0 <= y1) ids.push(r.item.id);
+		if (x1 >= tv.trackR - 60 && x0 <= tv.trackR) for (const s of c.spins) if (s.t >= tA && s.t <= tB) ids.push(s.id);
+		return [...new Set(ids)];
 	}
 	setSel(ids, add) { if (add) for (const id of ids) this.sel.add(id); else this.sel = new Set(ids); this.emit('select'); this.requestDraw(); }
 	toggleSel(ids) { const all = ids.every(id => this.sel.has(id)); for (const id of ids) all ? this.sel.delete(id) : this.sel.add(id); this.emit('select'); this.requestDraw(); }
@@ -2592,6 +3956,16 @@ class Editor {
 			const taken = new Set(others.map(p => p.t));
 			if (mv.some(p => taken.has(p.t))) continue;
 			this.setCamArr(key, K.sortByT([...others, ...mv]), c);
+		}
+		// timing column items and spins (time only; the first BPM and time signatures stay put)
+		for (const key of ['bpm', 'stops', 'spins', ...EV_KEYS]) {
+			const arr = c[key];
+			if (!arr.some(p => this.sel.has(p.id))) continue;
+			const mv = arr.filter(p => this.sel.has(p.id) && !(key === 'bpm' && p.t === 0)).map(p => ({ ...p, t: Math.max(key === 'bpm' ? 1 : 0, p.t + dt) }));
+			const ids = new Set(mv.map(p => p.id));
+			const others = arr.filter(p => !ids.has(p.id));
+			if (key !== 'raw') { const taken = new Set(others.map(p => p.t)); if (mv.some(p => taken.has(p.t))) continue; }
+			c[key] = K.sortByT([...others, ...mv]);
 		}
 		this.chart = c;
 		d.moved = dt !== 0 || dLane !== 0 || dv !== 0;
@@ -2737,6 +4111,7 @@ class Editor {
 			case 'sig': if (h.item.m === 0) { toast('The first time signature cannot be deleted.', true); this._snap = null; return; } c.sig = c.sig.filter(b => b.id !== h.item.id); break;
 			case 'stop': c.stops = c.stops.filter(b => b.id !== h.item.id); break;
 			case 'spin': c.spins = c.spins.filter(b => b.id !== h.item.id); break;
+			case 'ev': c[h.key] = c[h.key].filter(b => b.id !== h.item.id); break;
 		}
 		this.sel.delete(h.item.id);
 		this.hover = null;
@@ -2769,6 +4144,7 @@ class Editor {
 		c.tilt = c.tilt.filter(p => !ids.has(p.id));
 		c.stops = c.stops.filter(p => !ids.has(p.id));
 		c.spins = c.spins.filter(p => !ids.has(p.id));
+		for (const k of EV_KEYS) c[k] = c[k].filter(p => !ids.has(p.id));
 		c.bpm = c.bpm.filter(p => !ids.has(p.id) || p.t === 0);
 		c.sig = c.sig.filter(p => !ids.has(p.id) || p.m === 0);
 		const n = ids.size;
@@ -2776,24 +4152,34 @@ class Editor {
 		this.commit('Delete ' + n + ' item' + (n > 1 ? 's' : ''));
 		this.emit('select');
 	}
-	selectAll() {
+	selectAll(everything) {
 		const c = this.chart, ids = [];
 		c.bt.forEach(l => l.forEach(n => ids.push(n.id))); c.fx.forEach(l => l.forEach(n => ids.push(n.id)));
 		c.laser.forEach(l => l.forEach(s => s.pts.forEach(p => ids.push(p.id))));
+		if (everything) {
+			for (const k of K.CAM_KEYS) c.cam[k].forEach(p => ids.push(p.id));
+			c.tilt.forEach(p => ids.push(p.id)); c.spins.forEach(p => ids.push(p.id)); c.stops.forEach(p => ids.push(p.id));
+			c.bpm.forEach(p => { if (p.t > 0) ids.push(p.id); });
+			for (const k of EV_KEYS) c[k].forEach(p => ids.push(p.id));
+		}
 		this.setSel(ids);
 	}
 	copy(cut) {
 		const items = this.selected();
 		if (!items.length) return;
-		const out = { notes: [], secs: [], cams: [], minT: Infinity };
+		const out = { notes: [], secs: [], cams: [], evs: [], minT: Infinity };
 		const secSeen = new Set();
 		for (const e of items) {
 			if (e.kind === 'bt' || e.kind === 'fx') { out.notes.push({ kind: e.kind, lane: e.lane, n: e.item }); out.minT = Math.min(out.minT, e.item.t); }
 			else if (e.kind === 'lpt' && !secSeen.has(e.sec.id)) { secSeen.add(e.sec.id); out.secs.push({ lane: e.lane, s: e.sec }); out.minT = Math.min(out.minT, e.sec.t); }
 			else if (e.kind === 'cam') { out.cams.push({ key: e.key, p: e.item }); out.minT = Math.min(out.minT, e.item.t); }
+			else if (e.kind === 'bpm' || e.kind === 'stop' || e.kind === 'spin' || e.kind === 'ev') {
+				out.evs.push({ key: e.kind === 'bpm' ? 'bpm' : e.kind === 'stop' ? 'stops' : e.kind === 'spin' ? 'spins' : e.key, p: e.item });
+				out.minT = Math.min(out.minT, e.item.t);
+			}
 		}
 		this.clipboard = out;
-		toast('Copied ' + (out.notes.length + out.secs.length + out.cams.length) + ' item(s)');
+		toast('Copied ' + (out.notes.length + out.secs.length + out.cams.length + out.evs.length) + ' item(s)');
 		if (cut) this.deleteSelection();
 	}
 	paste(mirror) {
@@ -2822,6 +4208,13 @@ class Editor {
 			const f = (v) => neg && typeof v === 'number' ? -v : v;
 			const np = { ...p, id: K.nid(), t: p.t + off, v: f(p.v) }; if (p.vf !== undefined) np.vf = f(p.vf);
 			K.insertSorted(arr, np); this.setCamArr(key, arr); ids.push(np.id);
+		}
+		for (const { key, p } of cb.evs || []) {
+			const t = p.t + off; if (t < 0) continue;
+			const arr = key === 'raw' ? c[key].slice() : c[key].filter(q => q.t !== t);
+			const np = { ...p, id: K.nid(), t };
+			if (mirror && key === 'spins') np.dir = -p.dir;
+			K.insertSorted(arr, np); c[key] = arr; ids.push(np.id);
 		}
 		this.sel = new Set(ids);
 		this.commit(mirror ? 'Paste mirrored' : 'Paste');
@@ -2863,10 +4256,22 @@ class Editor {
 	}
 
 	// ---------------------------------------------------------------- timing events
+	setEvent(key, id, patch, label) { this.edit(label || 'Edit event', c => { const o = c[key].find(x => x.id === id); if (o) this.replaceIn(c[key], id, { ...o, ...patch }); }); }
+	editEventPopover(key, item, cx, cy) {
+		const H = EVENT_HELP[key] || {};
+		if (key === 'filterType') popover(cx, cy, H.title, [{ key: 'v', label: 'Effect', type: 'select', value: item.v, options: [...new Set([item.v, 'peak', 'lpf1', 'hpf1', 'bitc'])].map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Laser effect'));
+		else if (key === 'pfilterGain' || key === 'slamVol') popover(cx, cy, H.title, [{ key: 'v', label: 'Value', type: 'number', value: item.v, hint: H.short }], v => this.setEvent(key, item.id, { v: String(K.clamp(parseInt(v.v, 10) || 0, 0, 100)) }));
+		else if (key === 'slamSE') popover(cx, cy, H.title, [{ key: 'v', label: 'Sound', type: 'select', value: item.v, options: K.SLAM_SOUNDS.map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Slam sound'));
+		else if (key === 'raw') popover(cx, cy, H.title, [{ key: 'k', label: 'Key', type: 'text', value: item.k, hint: '"//" = comment, empty = plain line' }, { key: 'v', label: 'Value', type: 'text', value: item.v }], v => this.setEvent(key, item.id, { k: v.k, v: v.v }, 'Edit line'));
+	}
 	addTimingPopover(t, cx, cy) {
 		const ms = this.timing.measureOf(t);
 		popover(cx, cy, 'Add at ' + posLabel(this.timing, t, this.div), [
-			{ key: 'type', label: 'Type', type: 'select', value: 'bpm', options: [['bpm', 'BPM change'], ['sig', 'Time signature (measure ' + (ms.m + 1) + ')'], ['stop', 'Stop (pause scroll)'], ['spin', 'Spin / swing']] },
+			{ key: 'type', label: 'Type', type: 'select', value: 'bpm', options: [['bpm', 'BPM change'], ['sig', 'Time signature (measure ' + (ms.m + 1) + ')'], ['stop', 'Stop (pause scroll)'], ['spin', 'Spin / swing'], ['filterType', 'Laser effect (filtertype)'], ['pfilterGain', 'Laser effect strength (pfiltergain)'], ['slamVol', 'Slam volume (chokkakuvol)'], ['comment', 'Comment']] },
+			{ key: 'help', type: 'note', value: (v) => (EVENT_HELP[{ bpm: 'bpm', sig: 'sig', stop: 'stops', spin: 'spins' }[v.type] || v.type] || {}).short || '' },
+			{ key: 'fv', label: 'Effect', type: 'select', value: 'lpf1', options: [['peak', 'peak — peaking filter'], ['lpf1', 'lpf1 — low-pass'], ['hpf1', 'hpf1 — high-pass'], ['bitc', 'bitc — bitcrusher']], show: v => v.type === 'filterType' },
+			{ key: 'nv', label: 'Value (0–100)', type: 'number', value: '50', show: v => v.type === 'pfilterGain' || v.type === 'slamVol' },
+			{ key: 'cv', label: 'Text', type: 'text', value: '', show: v => v.type === 'comment' },
 			{ key: 'bpm', label: 'BPM', type: 'number', value: K.fmtNum(this.timing.bpmAt(t)), show: v => v.type === 'bpm' },
 			{ key: 'sig', label: 'Beats', type: 'text', value: ms.n + '/' + ms.d, show: v => v.type === 'sig' },
 			{ key: 'stop', label: 'Length', type: 'text', value: '1/8', show: v => v.type === 'stop', hint: 'measures, e.g. 1/8, 3/16, 1' },
@@ -2877,9 +4282,13 @@ class Editor {
 			else if (v.type === 'sig') { const [n, d] = String(v.sig).split('/').map(x => parseInt(x, 10)); if (!(n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d))) return toast('Use n/d where d is 1, 2, 4, 8, 16, 32 or 64', true); this.setSigAt(ms.m, n, d); }
 			else if (v.type === 'stop') { const l = parseLen(v.stop); if (!(l > 0)) return toast('Enter a length like 1/8', true); this.edit('Add stop', c => { c.stops = c.stops.filter(s => s.t !== t); K.insertSorted(c.stops, { id: K.nid(), t, l }); }); }
 			else if (v.type === 'spin') { const l = parseLen(v.slen); this.setSpinAt(t, v.spin, l > 0 ? l : 960); }
+			else if (v.type === 'filterType') this.setStepAt('filterType', t, v.fv, 'Laser effect');
+			else if (v.type === 'pfilterGain' || v.type === 'slamVol') this.setStepAt(v.type, t, K.clamp(parseInt(v.nv, 10) || 0, 0, 100), v.type === 'slamVol' ? 'Slam volume' : 'Laser effect strength');
+			else if (v.type === 'comment') this.edit('Add comment', c => { K.insertSorted(c.raw = c.raw.slice(), { id: K.nid(), t, k: '//', v: v.cv }); });
 		});
 	}
 	editTimingItem(h, cx, cy) {
+		if (h.kind === 'ev') { this.editEventPopover(h.key, h.item, cx, cy); return; }
 		if (h.kind === 'bpm') popover(cx, cy, 'BPM change', [{ key: 'v', label: 'BPM', type: 'number', value: K.fmtNum(h.item.v) }], v => { const b = parseFloat(v.v); if (b > 0) this.setBpmAt(h.item.t, b); });
 		else if (h.kind === 'sig') popover(cx, cy, 'Time signature (measure ' + (h.item.m + 1) + ')', [{ key: 'v', label: 'Beats', type: 'text', value: h.item.n + '/' + h.item.d }], v => { const [n, d] = String(v.v).split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) this.setSigAt(h.item.m, n, d); });
 		else if (h.kind === 'stop') popover(cx, cy, 'Stop', [{ key: 'v', label: 'Length', type: 'text', value: fmtLen(h.item.l) }], v => { const l = parseLen(v.v); if (l > 0) this.edit('Edit stop', c => this.replaceIn(c.stops, h.item.id, { ...h.item, l })); });
@@ -2919,10 +4328,18 @@ class Editor {
 		const t = this.cursor;
 		this.playStartTick = t;
 		const s = this.songTimeOf(t);
+		this.syncFx(true);
 		this.audio.play(s, this.settings.rate);
 		this.playing = true; this.playTick = t;
 		this.buildHits(s);
 		this.emit('play');
+	}
+	// compile FX hold / laser filter effects for the audio worklet
+	syncFx(force) {
+		if (!this.audio.ctx) return;
+		if (!force && this.fxVer === this.version) return;
+		this.fxVer = this.version;
+		try { this.audio.setSchedule(KSMFX.buildSchedule(this)); } catch (e) { console.warn('fx schedule', e); }
 	}
 	pause() { // stop and leave the cursor where playback is
 		if (!this.playing) return;
@@ -2940,10 +4357,22 @@ class Editor {
 	seekTo(t) { const was = this.playing; if (was) { this.audio.stop(); this.playing = false; } this.cursor = Math.max(0, t); if (was) this.play(); this.requestDraw(); }
 	buildHits(fromSong) {
 		const c = this.chart, ev = [];
-		const add = (t, k) => ev.push({ s: this.songTimeOf(t), k });
+		// game: sounds the game itself plays (slams, FX chip key sounds); hit: editor tick sounds
+		const add = (t, k, g, game) => ev.push({ s: this.songTimeOf(t), k, g: g === undefined ? 1 : g, game: !!game });
 		c.bt.forEach(l => l.forEach(n => add(n.t, 'bt')));
-		c.fx.forEach(l => l.forEach(n => add(n.t, 'fx')));
-		c.laser.forEach(l => l.forEach(s => s.pts.forEach(p => { if (p.v !== p.vf) add(s.t + p.ry, 'slam'); })));
+		c.fx.forEach(l => l.forEach(n => {
+			if (n.l === 0 && n.se) { const [name, vol] = n.se.split(';'); add(n.t, 'se_' + name, K.clamp((parseFloat(vol) || 100) / 100, 0, 1), true); }
+			else add(n.t, 'fx');
+		}));
+		const defVol = parseFloat(c.meta.chokkakuvol); const sv0 = Number.isFinite(defVol) ? defVol : 50;
+		const seAt = new Map(c.slamSE.map(e => [e.t, e.v]));
+		c.laser.forEach(l => l.forEach(s => s.pts.forEach(p => {
+			if (p.v === p.vf) return;
+			const t = s.t + p.ry, se = seAt.get(t) || 'normal';
+			if (se === 'mute') return;
+			const vp = K.lastAtOrBefore(c.slamVol, t), vol = vp ? parseFloat(vp.v) : sv0;
+			add(t, 'slam_' + se, K.clamp((Number.isFinite(vol) ? vol : 50) / 50, 0, 2), true);
+		})));
 		ev.sort((a, b) => a.s - b.s);
 		this.hits = ev;
 		let i = 0; while (i < ev.length && ev[i].s < fromSong - 0.001) i++;
@@ -2957,12 +4386,13 @@ class Editor {
 		const nowCtxSong = a.t0Song + (a.ctx.currentTime - a.t0Ctx) * a.rate;
 		if (this.hitsDirty) this.buildHits(nowCtxSong);
 		const horizon = nowCtxSong + 0.15 * a.rate;
-		if (this.settings.hitsounds) {
-			while (this.hitPtr < this.hits.length && this.hits[this.hitPtr].s <= horizon) {
-				const h = this.hits[this.hitPtr++];
-				if (h.s >= nowCtxSong - 0.01) a.schedule(h.k, h.s);
-			}
-		} else this.hitPtr = this.hits.length;
+		const S = this.settings;
+		while (this.hitPtr < this.hits.length && this.hits[this.hitPtr].s <= horizon) {
+			const h = this.hits[this.hitPtr++];
+			if (h.s < nowCtxSong - 0.01) continue;
+			if (h.game ? S.gameSounds !== false : S.hitsounds) a.schedule(h.k, h.s, h.g, h.game ? 'game' : 'hit');
+		}
+		if (this.playing && this.fxVer !== this.version && !this.drag) this.syncFx();
 		if (this.settings.volMetro > 0) {
 			if (this.nextBeat === null) { const t = this.tickOfSong(nowCtxSong); const ms = this.timing.measureOf(Math.max(0, t)); const bl = 960 / ms.d; this.nextBeat = ms.start + Math.ceil((t - ms.start) / bl - 1e-6) * bl; }
 			for (let k = 0; k < 16; k++) {
@@ -3050,8 +4480,9 @@ function popover(cx, cy, title, fields, onOk) {
 	const el = $('#popover');
 	el.innerHTML = '';
 	el.append(h('h5', null, title));
-	const inputs = {}, rows = [];
+	const inputs = {}, rows = [], notes = [];
 	for (const f of fields) {
+		if (f.type === 'note') { const n = h('div', { class: 'note', style: 'max-width:300px;margin:0 0 6px' }); notes.push([n, f]); el.append(n); continue; }
 		let inp;
 		if (f.type === 'select') { inp = h('select', null, f.options.map(([v, l]) => h('option', { value: v }, l))); inp.value = f.value; }
 		else inp = h('input', { type: f.type === 'number' ? 'text' : 'text', value: f.value, inputmode: f.type === 'number' ? 'decimal' : undefined });
@@ -3062,7 +4493,7 @@ function popover(cx, cy, title, fields, onOk) {
 		if (f.hint) el.append(h('div', { class: 'note', style: 'margin:-2px 0 4px 86px' }, f.hint));
 	}
 	const read = () => Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, i.value]));
-	const vis = () => { const v = read(); for (const [r, f] of rows) { const show = !f.show || f.show(v); r.style.display = show ? '' : 'none'; if (r.nextSibling && r.nextSibling.classList && r.nextSibling.classList.contains('note')) r.nextSibling.style.display = show ? '' : 'none'; } };
+	const vis = () => { const v = read(); for (const [n, f] of notes) n.textContent = typeof f.value === 'function' ? f.value(v) : f.value; for (const [r, f] of rows) { const show = !f.show || f.show(v); r.style.display = show ? '' : 'none'; if (r.nextSibling && r.nextSibling.classList && r.nextSibling.classList.contains('note')) r.nextSibling.style.display = show ? '' : 'none'; } };
 	el.addEventListener('input', vis); el.addEventListener('change', vis); vis();
 	const close = () => { el.classList.add('hidden'); popoverClose = null; $('#timeline').focus(); };
 	const ok = () => { const v = read(); close(); onOk(v); };
@@ -3081,6 +4512,7 @@ function popover(cx, cy, title, fields, onOk) {
 const ed = new Editor();
 const tl = new TimelineView($('#timeline'), ed); ed.tl = tl;
 const pv = new Preview3D($('#preview'), ed);
+ed.preview = pv;
 let currentTab = 'props';
 
 function fileNameNoExt() { return (ed.fileName || 'chart.ksh').replace(/\.ksh$/i, ''); }
@@ -3104,6 +4536,8 @@ function buildMenus() {
 			['Save .ksh', 'Ctrl+S', () => save(false)],
 			['Save .ksh as…', 'Ctrl+Shift+S', () => save(true)],
 			['Export for KSM v1 (bake curves)…', '', exportV1],
+			['Export for USC (unnamed sdvx clone)…', '', exportUsc],
+			['Export for SOUND VOLTEX (.vox + .2dx)…', '', exportSdvxDialog],
 			['View .ksh text…', '', viewKsh],
 			'-',
 			['Restore autosave', '', restoreAutosave],
@@ -3111,7 +4545,8 @@ function buildMenus() {
 		['Edit', [
 			['Undo', 'Ctrl+Z', () => ed.undo()], ['Redo', 'Ctrl+Y', () => ed.redo()], '-',
 			['Cut', 'Ctrl+X', () => ed.copy(true)], ['Copy', 'Ctrl+C', () => ed.copy()], ['Paste at cursor', 'Ctrl+V', () => ed.paste(false)], ['Paste mirrored', 'Ctrl+Shift+V', () => ed.paste(true)],
-			['Delete', 'Del', () => ed.deleteSelection()], ['Select all notes', 'Ctrl+A', () => ed.selectAll()], '-',
+			['Delete', 'Del', () => ed.deleteSelection()], ['Select all notes', 'Ctrl+A', () => ed.selectAll()], ['Select everything', 'Ctrl+Shift+A', () => ed.selectAll(true)], '-',
+			['Add slam kicks…', '', () => slamKickDialog(true)], ['Remove slam kicks…', '', () => slamKickDialog(false)], '-',
 			['Mirror selection', 'Ctrl+M', () => ed.mirrorSelection()], ['Move selection up a step', 'Alt+↑', () => ed.nudgeSelection(1)], ['Move selection down a step', 'Alt+↓', () => ed.nudgeSelection(-1)],
 		]],
 		['View', [
@@ -3192,7 +4627,8 @@ function buildOptbar() {
 		const cv = h('select', { title: 'Curve for new segments (KSM v2)', onchange: (e) => { ed.newCurve = e.target.value; } }, K.CURVE_PRESETS.map(p => h('option', { value: p.id }, p.label)));
 		cv.value = ed.newCurve;
 		const wide = h('button', { class: ed.newWide ? 'on' : '', title: 'New lasers are wide (laserrange 2x)', onclick: () => { ed.newWide = !ed.newWide; wide.classList.toggle('on', ed.newWide); } }, '2x wide');
-		ob.append(h('div', { class: 'grp' }, h('label', null, 'Positions'), ls), h('div', { class: 'grp' }, h('label', null, 'Curve'), cv), wide);
+		const kick = h('button', { class: ed.settings.autoKick ? 'on' : '', title: 'New slams also get a zoom_side "kick": the lane jumps in the slam\'s direction and eases back. The kick is made of normal Zoom Side keyframes you can move or delete.', onclick: () => { ed.settings.autoKick = !ed.settings.autoKick; ed.saveSettings(); kick.classList.toggle('on', ed.settings.autoKick); } }, 'Slam kick ±' + (ed.settings.kickAmount || 30));
+		ob.append(h('div', { class: 'grp' }, h('label', null, 'Positions'), ls), h('div', { class: 'grp' }, h('label', null, 'Curve'), cv), wide, kick);
 		hint = 'Drag: draw a laser · Drag from its end point: continue · Drag sideways: slam · Drag a point: move · Alt: no snap';
 	}
 	ob.append(h('div', { class: 'hint' }, hint));
@@ -3206,8 +4642,10 @@ function fxEditor(value, onChange, opts = {}) {
 	const preset = K.FX_EFFECTS.find(f => f.name === name);
 	const mode = !value ? '' : preset ? name : defs.includes(name) ? 'def:' + name : 'custom';
 	const wrap = h('span', { class: 'ctl', style: 'display:inline-flex;gap:4px;align-items:center' });
-	const sel = h('select', null, h('option', { value: '' }, '(no effect)'), K.FX_EFFECTS.map(f => h('option', { value: f.name }, f.name)), defs.map(d => h('option', { value: 'def:' + d }, d + ' (custom)')), h('option', { value: 'custom' }, 'Other…'));
+	const sel = h('select', null, h('option', { value: '' }, '(no effect)'), K.FX_EFFECTS.map(f => h('option', { value: f.name, title: FX_HELP[f.name] || '' }, f.name)), defs.map(d => h('option', { value: 'def:' + d }, d + ' (custom)')), h('option', { value: 'custom' }, 'Other…'));
 	sel.value = mode;
+	const tip = () => { sel.title = FX_HELP[sel.value] || 'Effect applied to the music while this FX hold is held'; };
+	tip(); sel.addEventListener('change', tip);
 	const params = h('span', { style: 'display:inline-flex;gap:3px' });
 	const custom = h('input', { type: 'text', value: mode === 'custom' ? value : '', placeholder: 'e.g. Retrigger;16', style: 'width:110px' });
 	const emit = () => {
@@ -3233,6 +4671,45 @@ function fxEditor(value, onChange, opts = {}) {
 
 // ---------------------------------------------------------------- transport
 const TR = {};
+// what each FX hold effect does (tooltips); parameters follow KSM / USC
+const FX_HELP = {
+	Retrigger: 'Retrigger: repeats a short slice of the music over and over. Wave 1/n = slice length (8 = 1/8 note).',
+	Gate: 'Gate: chops the music on and off. Wave 1/n = how often (8 = every 1/8 note).',
+	Flanger: 'Flanger: sweeping "jet plane" whoosh.',
+	PitchShift: 'PitchShift: raises the pitch by n semitones (12 = one octave up).',
+	BitCrusher: 'BitCrusher: crunchy lo-fi sound. Bigger reduction = crunchier.',
+	Phaser: 'Phaser: slow swirling sweep.',
+	Wobble: 'Wobble: a low-pass filter that wobbles. Wave 1/n = speed (12 = every 1/12 note).',
+	TapeStop: 'TapeStop: the music slows down to a stop like a tape deck. Higher speed = stops faster.',
+	Echo: 'Echo: repeats what was playing every 1/n note, fading by the feedback %.',
+	SideChain: 'SideChain: ducks the volume on every beat (pumping).',
+};
+const FILTER_LABEL = { peak: 'peaking filter (default)', lpf1: 'low-pass', hpf1: 'high-pass', bitc: 'bitcrusher' };
+// ---- preview pane: speed control + resize
+function syncSpeedUI() {
+	const S = ed.settings, el = $('#pvSpeed'); if (!el) return;
+	const hs = S.speedMode === 'hs';
+	// mod mode is shown like SDVX EG's LANE-SPEED (BPM x hi-speed / 100)
+	const get = () => hs ? S.hiSpeed : S.modSpeed / 100;
+	const step = hs ? 0.25 : 0.25, lo = hs ? 0.5 : 1, hi = 20;
+	const set = (v) => { v = Math.round(K.clamp(v, lo, hi) * 100) / 100; if (hs) S.hiSpeed = v; else S.modSpeed = Math.round(v * 100); ed.saveSettings(); inp.value = get().toFixed(2); ed.requestDraw(); if (currentTab === 'settings') renderTab(true); };
+	const inp = h('input', { type: 'text', inputmode: 'decimal', value: get().toFixed(2), title: hs ? 'Hi-speed multiplier' : 'Lane speed = BPM × hi-speed ÷ 100, reached at the chart\'s main BPM (like SDVX EG)', onchange: (e) => set(parseFloat(e.target.value) || get()) });
+	el.replaceChildren(
+		h('span', { class: 'lbl', title: 'Click to switch between lane speed and a fixed hi-speed multiplier', onclick: () => { S.speedMode = hs ? 'mod' : 'hs'; ed.saveSettings(); syncSpeedUI(); ed.requestDraw(); if (currentTab === 'settings') renderTab(true); } }, hs ? 'HS' : 'SPEED'),
+		h('button', { title: 'Slower', onclick: () => set(get() - step) }, '−'), inp, h('button', { title: 'Faster', onclick: () => set(get() + step) }, '+'));
+}
+(() => {
+	const pane = $('#previewPane'), grip = $('#pvResize');
+	pane.style.width = (ed.settings.previewW || 320) + 'px';
+	grip.addEventListener('pointerdown', (e) => {
+		e.preventDefault(); grip.setPointerCapture(e.pointerId); grip.classList.add('on');
+		const x0 = e.clientX, w0 = pane.getBoundingClientRect().width;
+		const move = (ev) => { const w = Math.round(K.clamp(w0 + ev.clientX - x0, 180, Math.min(900, window.innerWidth * 0.6))); pane.style.width = w + 'px'; ed.settings.previewW = w; tl.resize(); pv.resize(); ed.requestDraw(); };
+		const up = () => { grip.classList.remove('on'); grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); ed.saveSettings(); };
+		grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up);
+	});
+})();
+
 function buildTransport() {
 	const t = $('#transport'); t.innerHTML = '';
 	TR.start = h('button', { class: 'ibtn', title: 'Go to start (Home)', html: ICONS.start, onclick: () => moveCursor(0) });
@@ -3338,7 +4815,7 @@ function renderProps(body) {
 		for (const e of items) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
 		const fxHolds = items.filter(e => e.kind === 'fx' && e.item.l > 0);
 		body.append(sec(items.length + ' selected',
-			h('div', { class: 'note' }, Object.entries(kinds).map(([k, n]) => n + ' ' + ({ bt: 'BT', fx: 'FX', lpt: 'laser point', cam: 'keyframe', bpm: 'BPM', stop: 'stop', spin: 'spin', sig: 'beat' }[k] || k) + (n > 1 ? 's' : '')).join(', ')),
+			h('div', { class: 'note' }, Object.entries(kinds).map(([k, n]) => n + ' ' + ({ bt: 'BT', fx: 'FX', lpt: 'laser point', cam: 'keyframe', bpm: 'BPM', stop: 'stop', spin: 'spin', sig: 'beat', ev: 'event' }[k] || k) + (n > 1 ? 's' : '')).join(', ')),
 			fxHolds.length ? row('FX hold effect', fxEditor(fxHolds[0].item.fx || '', (v) => ed.edit('Set FX effect', c => { for (const e of fxHolds) { const arr = c.fx[e.lane]; const n = arr.find(o => o.id === e.item.id); if (n) ed.replaceIn(arr, n.id, v ? { ...n, fx: v } : (({ fx, ...r }) => r)(n)); } }))) : null,
 			h('div', { class: 'btns' }, h('button', { onclick: () => ed.mirrorSelection() }, 'Mirror (Ctrl+M)'), h('button', { onclick: () => ed.copy() }, 'Copy'), h('button', { onclick: () => ed.deleteSelection() }, 'Delete'))));
 		return;
@@ -3389,6 +4866,10 @@ function renderProps(body) {
 			const seSel = h('select', { onchange: (ev) => ed.edit('Slam sound', c => { c.slamSE = c.slamSE.filter(x => x.t !== t); if (ev.target.value) K.insertSorted(c.slamSE, { id: K.nid(), t, v: ev.target.value }); }) }, h('option', { value: '' }, '(default)'), K.SLAM_SOUNDS.map(x => h('option', { value: x }, x)));
 			seSel.value = seCur ? seCur.v : '';
 			box.append(row('Slam sound', seSel));
+			const zk = ed.chart.cam.zoom_side.find(x => x.t === t && typeof x.vf === 'number' && x.vf !== x.v);
+			box.append(row('Zoom side kick', zk
+				? h('span', null, h('span', { class: 'muted' }, (zk.vf - zk.v > 0 ? '+' : '') + K.fmtNum(zk.vf - zk.v) + ' '), h('button', { onclick: () => ed.edit('Remove slam kick', c => ed.removeSlamKicks(c, [{ t }])) }, 'Remove'))
+				: h('button', { onclick: () => { const n = ed.edit('Add slam kick', c => ed.addSlamKicks(c, ed.slamList(c, new Set([p.id])))); if (!n) toast('This slam already has Zoom Side keyframes nearby'); } }, 'Add kick ±' + (ed.settings.kickAmount || 30))));
 		}
 		body.append(box);
 		// spin / swing editor on this tick
@@ -3408,9 +4889,27 @@ function renderProps(body) {
 		if (sp && sp.kind === 'swing') spinSec.append(row('Swing', amp, rep, dec));
 		body.append(spinSec);
 		const wide = h('input', { type: 'checkbox', checked: !!s.wide, onchange: (ev) => ed.edit('Wide laser', c => { const arr = c.laser[lane]; const so = arr.find(x => x.id === s.id); if (so) ed.replaceIn(arr, so.id, { ...so, wide: ev.target.checked }); }) });
+		const tiltSel = h('select', { title: 'What the game\'s automatic laser tilt does while this laser plays', onchange: (ev) => ed.setLaserTiltMode(s, ev.target.value) },
+			h('option', { value: 'inherit' }, 'Automatic (no change)'), h('option', { value: 'zero' }, 'Off for this laser (tilt=zero)'),
+			['normal', 'bigger', 'biggest', 'keep_normal', 'keep_bigger', 'keep_biggest'].map(m => h('option', { value: m }, m)));
+		tiltSel.value = ed.laserTiltMode(s);
+		const defs = KSMFX.parseDefines(ed.chart.defs);
+		const filters = ['peak', 'lpf1', 'hpf1', 'bitc', ...Object.keys(defs).filter(k => k.startsWith('filter:')).map(k => k.slice(7))];
+		const curF = ed.stepAt(ed.chart.filterType, s.t, ed.chart.meta.filtertype || 'peak');
+		const atF = ed.chart.filterType.find(x => x.t === s.t);
+		const fSel = h('select', { onchange: (ev) => ed.setStepAt('filterType', s.t, ev.target.value === '-' ? null : ev.target.value, 'Laser effect') },
+			h('option', { value: '-' }, 'Keep current (' + curF + ')'), filters.map(f => h('option', { value: f }, FILTER_LABEL[f] ? f + ' — ' + FILTER_LABEL[f] : f)));
+		fSel.value = atF ? atF.v : '-';
+		const curG = ed.stepAt(ed.chart.pfilterGain, s.t, ed.chart.meta.pfiltergain || '50');
+		const atG = ed.chart.pfilterGain.find(x => x.t === s.t);
+		const gIn = numInput(atG ? atG.v : '', (v) => ed.setStepAt('pfilterGain', s.t, v === '' ? null : K.clamp(parseInt(v, 10) || 0, 0, 100), 'Laser effect strength'), { style: 'width:50px', placeholder: String(curG), title: 'pfiltergain 0–100 from this laser on (empty = keep ' + curG + ')' });
 		body.append(sec('Whole laser',
 			row('Starts', h('span', null, pos(s.t))),
 			row('Wide (2x)', wide, h('span', { class: 'muted' }, 'laserrange_' + (lane ? 'r' : 'l') + '=2x')),
+			row('Engine tilt', tiltSel),
+			row('Laser effect', fSel),
+			row('Effect strength', gIn, h('span', { class: 'muted' }, '% (pfiltergain)')),
+			h('div', { class: 'note' }, 'Engine tilt: the game tilts the lane toward the lasers on its own (±10°, shown as the dashed line in the Tilt column). "Off" writes tilt=zero at the start of this laser and restores the previous mode at its end. Laser effect / strength are written as filtertype / pfiltergain at the start of this laser and stay until changed.'),
 			h('div', { class: 'btns' },
 				h('button', { onclick: () => ed.setSel(s.pts.map(q => q.id)) }, 'Select all points'),
 				h('button', { onclick: () => ed.edit('Delete point', () => ed.deleteLaserPoints(new Set([p.id]))) }, 'Delete point'),
@@ -3420,7 +4919,7 @@ function renderProps(body) {
 	if (e.kind === 'cam') {
 		const p = e.item, key = e.key, isTilt = key === 'tilt';
 		const upd = (label, fn) => ed.edit(label, () => { const arr = ed.camArr(key).slice(); const o = arr.find(x => x.id === p.id); if (!o) return; const np = fn({ ...o }); ed.replaceIn(arr, o.id, np); ed.setCamArr(key, arr); });
-		const box = sec(COL_INFO[key].label + ' keyframe', row('Position', h('span', null, pos(p.t))));
+		const box = sec(COL_INFO[key].label + ' keyframe', h('div', { class: 'note' }, EVENT_HELP[key].short), row('Position', h('span', null, pos(p.t))));
 		if (isTilt) {
 			const mode = h('select', { onchange: (ev) => upd('Tilt type', q => { q.v = ev.target.value === 'manual' ? 0 : ev.target.value; if (typeof q.v !== 'number') { delete q.vf; q.a = 0; q.b = 0; } return q; }) }, h('option', { value: 'manual' }, 'Manual value'), K.TILT_AUTO.map(a => h('option', { value: a }, 'Auto: ' + a)));
 			mode.value = typeof p.v === 'number' ? 'manual' : p.v;
@@ -3441,10 +4940,23 @@ function renderProps(body) {
 		body.append(box);
 		return;
 	}
-	if (e.kind === 'bpm') { body.append(sec('BPM change', row('Position', h('span', null, pos(e.item.t))), row('BPM', numInput(K.fmtNum(e.item.v), (v) => { const b = parseFloat(v); if (b > 0) ed.setBpmAt(e.item.t, b); })))); return; }
-	if (e.kind === 'stop') { body.append(sec('Stop', row('Position', h('span', null, pos(e.item.t))), row('Length', numInput(fmtLen(e.item.l), (v) => { const l = parseLen(v); if (l > 0) ed.edit('Edit stop', c => ed.replaceIn(c.stops, e.item.id, { ...e.item, l })); }), h('span', { class: 'muted' }, 'measures')))); return; }
-	if (e.kind === 'sig') { body.append(sec('Time signature', row('Measure', h('span', null, e.item.m + 1)), row('Beats', numInput(e.item.n + '/' + e.item.d, (v) => { const [n, d] = v.split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) ed.setSigAt(e.item.m, n, d); })))); return; }
-	if (e.kind === 'spin') { const s = e.item; body.append(sec('Spin / swing', row('Position', h('span', null, pos(s.t))), row('Effect', (() => { const sl = h('select', { onchange: (ev) => ed.setSpinAt(s.t, ev.target.value, s.l, s) }, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l))); sl.value = spinCode(s); return sl; })()), row('Length', numInput(fmtLen(s.l), (v) => { const l = parseLen(v); if (l > 0) ed.setSpinAt(s.t, spinCode(s), l, s); }), h('span', { class: 'muted' }, 'measures')))); }
+	if (e.kind === 'ev') {
+		const it = e.item, key = e.key, Hh = EVENT_HELP[key];
+		const box = sec(Hh.title + (Hh.ksh ? ' · ' + Hh.ksh : ''), row('Position', h('span', null, pos(it.t))));
+		if (key === 'filterType') {
+			const sl = h('select', { onchange: (ev) => ed.setEvent(key, it.id, { v: ev.target.value }, 'Laser effect') }, [...new Set([it.v, 'peak', 'lpf1', 'hpf1', 'bitc'])].map(v => h('option', { value: v }, FILTER_LABEL[v] ? v + ' — ' + FILTER_LABEL[v] : v)));
+			sl.value = it.v; box.append(row('Effect', sl));
+		} else if (key === 'pfilterGain' || key === 'slamVol') box.append(row('Value', numInput(it.v, (v) => ed.setEvent(key, it.id, { v: String(K.clamp(parseInt(v, 10) || 0, 0, 100)) }), { style: 'width:60px' }), h('span', { class: 'muted' }, '0–100')));
+		else if (key === 'slamSE') { const sl = h('select', { onchange: (ev) => ed.setEvent(key, it.id, { v: ev.target.value }, 'Slam sound') }, K.SLAM_SOUNDS.map(v => h('option', { value: v }, v))); sl.value = it.v; box.append(row('Sound', sl)); }
+		else if (key === 'raw') { box.append(row('Key', numInput(it.k, (v) => ed.setEvent(key, it.id, { k: v }, 'Edit line'), { style: 'width:120px' })), row('Value', numInput(it.v, (v) => ed.setEvent(key, it.id, { v }, 'Edit line'), { style: 'width:160px' }))); }
+		box.append(h('div', { class: 'note' }, Hh.short), h('div', { class: 'btns' }, h('button', { onclick: () => ed.copy() }, 'Copy'), h('button', { onclick: () => ed.deleteSelection() }, 'Delete')));
+		body.append(box); return;
+	}
+	const helpNote = (k) => h('div', { class: 'note' }, EVENT_HELP[k].short);
+	if (e.kind === 'bpm') { body.append(sec('BPM change', helpNote('bpm'), row('Position', h('span', null, pos(e.item.t))), row('BPM', numInput(K.fmtNum(e.item.v), (v) => { const b = parseFloat(v); if (b > 0) ed.setBpmAt(e.item.t, b); })))); return; }
+	if (e.kind === 'stop') { body.append(sec('Stop', helpNote('stops'), row('Position', h('span', null, pos(e.item.t))), row('Length', numInput(fmtLen(e.item.l), (v) => { const l = parseLen(v); if (l > 0) ed.edit('Edit stop', c => ed.replaceIn(c.stops, e.item.id, { ...e.item, l })); }), h('span', { class: 'muted' }, 'measures')))); return; }
+	if (e.kind === 'sig') { body.append(sec('Time signature', helpNote('sig'), row('Measure', h('span', null, e.item.m + 1)), row('Beats', numInput(e.item.n + '/' + e.item.d, (v) => { const [n, d] = v.split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) ed.setSigAt(e.item.m, n, d); })))); return; }
+	if (e.kind === 'spin') { const s = e.item; body.append(sec('Spin / swing', helpNote('spins'), row('Position', h('span', null, pos(s.t))), row('Effect', (() => { const sl = h('select', { onchange: (ev) => ed.setSpinAt(s.t, ev.target.value, s.l, s) }, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l))); sl.value = spinCode(s); return sl; })()), row('Length', numInput(fmtLen(s.l), (v) => { const l = parseLen(v); if (l > 0) ed.setSpinAt(s.t, spinCode(s), l, s); }), h('span', { class: 'muted' }, 'measures')))); }
 }
 
 function renderChartTab(body) {
@@ -3538,7 +5050,7 @@ function renderCheck(body) {
 
 function renderSettings(body) {
 	const S = ed.settings;
-	const save = () => { ed.saveSettings(); ed.applyAudioSettings(); tl.layout(); ed.requestDraw(); };
+	const save = () => { ed.saveSettings(); ed.applyAudioSettings(); tl.layout(); ed.requestDraw(); syncSpeedUI(); };
 	const slider = (k, min, max, step, fmt) => { const out = h('span', { class: 'muted', style: 'min-width:42px' }, fmt(S[k])); return [h('input', { type: 'range', min, max, step, value: S[k], style: 'flex:1', oninput: (e) => { S[k] = +e.target.value; out.textContent = fmt(S[k]); save(); } }), out]; };
 	const chk = (k, after) => h('input', { type: 'checkbox', checked: S[k], onchange: (e) => { S[k] = e.target.checked; save(); if (after) after(); } });
 	const pct = v => Math.round(v * 100) + '%';
@@ -3546,18 +5058,59 @@ function renderSettings(body) {
 		row('Music volume', ...slider('volMusic', 0, 1, 0.01, pct)),
 		row('Hitsound volume', ...slider('volHit', 0, 1, 0.01, pct)),
 		row('Metronome volume', ...slider('volMetro', 0, 1, 0.01, pct)),
+		row('Game sounds volume', ...slider('volGame', 0, 1, 0.01, pct)),
 		row('Hitsounds', chk('hitsounds', () => TR.hits.classList.toggle('on', S.hitsounds))),
+		row('Slam & FX chip sounds', chk('gameSounds')),
+		row('Play FX effects', chk('playFx')),
+		h('div', { class: 'note' }, 'Hitsounds are editor ticks for every note. Slam & FX chip sounds are the sounds the game plays (chokkakuse / chokkakuvol, fx-l_se / fx-r_se). "Play FX effects" applies FX hold effects and the laser filter to the music the way USC does, so you hear Retrigger, Gate, Flanger, peak/LPF/HPF/bitcrush etc. while editing.'),
 		row('Click when placing', chk('placeSound')),
 		row('Visual latency', ...slider('latencyMs', -150, 150, 1, v => v + ' ms')),
 		h('div', { class: 'note' }, 'Playback timing comes from the audio clock and already corrects for your output device. Only adjust latency if the cursor still looks early (+) or late (−) against what you hear, e.g. with Bluetooth headphones.')));
 	body.append(sec('View',
 		row('Lane width', ...slider('laneW', 26, 80, 1, v => v + ' px')),
-		row('Preview note speed', ...slider('previewBeats', 2, 12, 0.5, v => v + ' beats')),
+		row('Preview speed', h('select', { onchange: (e) => { S.speedMode = e.target.value; save(); } }, h('option', { value: 'mod', selected: S.speedMode !== 'hs' }, 'Lane speed (like SDVX EG)'), h('option', { value: 'hs', selected: S.speedMode === 'hs' }, 'Hi-speed multiplier'))),
+		row('Lane speed', ...slider('modSpeed', 100, 2000, 5, v => (v / 100).toFixed(2))),
+		row('Hi-speed', ...slider('hiSpeed', 0.5, 20, 0.05, v => (+v).toFixed(2))),
+		row('Draw offset', ...slider('drawOffsetMs', -200, 200, 1, v => (v > 0 ? '+' : '') + v + ' ms')),
+		h('div', { class: 'note' }, 'Lane speed = BPM × hi-speed ÷ 100 at the chart\'s main BPM, so 8.00 looks the same in every chart, and faster BPM sections still scroll faster (as in game). The preview uses USC\'s camera, so the track, tilt, spins and zooms match USC. Draw offset is like the game\'s DRAW setting: + makes notes meet a point above the judgment line, − below it. It only moves the preview\'s notes; sound and the timeline are unaffected.'),
 		row('Show waveform', chk('showWave')),
 		row('Show preview', chk('showPreview', () => { $('#previewPane').classList.toggle('hidden', !S.showPreview); requestAnimationFrame(() => { tl.resize(); pv.resize(); }); })),
 		row('Follow playback', chk('follow')),
 		row('Invert mouse wheel', chk('invertWheel'))));
 	body.append(sec('Saving', row('Autosave (browser)', chk('autosave')), h('div', { class: 'note' }, 'Autosave keeps a copy of the chart in this browser every 15 s. Use File → Restore autosave to get it back.')));
+}
+
+// ---------------------------------------------------------------- slam kicks
+function slamKickDialog(add) {
+	const S = ed.settings;
+	const selSlams = ed.slamList(ed.chart, ed.sel);
+	const scope = h('select', null, h('option', { value: 'sel' }, 'Selected slams (' + selSlams.length + ')'), h('option', { value: 'all' }, 'All slams in the chart'));
+	scope.value = selSlams.length ? 'sel' : 'all';
+	const amt = h('input', { type: 'text', value: S.kickAmount || 30, style: 'width:60px' });
+	const len = h('input', { type: 'text', value: fmtLen(S.kickLen || 120), style: 'width:60px' });
+	const go = () => {
+		const list = scope.value === 'sel' ? selSlams : ed.slamList(ed.chart);
+		if (!list.length) { toast('No slams to change'); return; }
+		if (add) {
+			const A = parseFloat(amt.value), L = parseLen(len.value);
+			if (!(A > 0) || !(L > 0)) { toast('Enter an amount and a length'); return; }
+			S.kickAmount = A; S.kickLen = L; ed.saveSettings();
+			const n = ed.edit('Add slam kicks', c => ed.addSlamKicks(c, list, A, L));
+			toast(n + ' kick' + (n === 1 ? '' : 's') + ' added' + (n < new Set(list.map(x => x.t)).size ? ' (slams that already have Zoom Side keyframes were skipped)' : ''));
+		} else {
+			const n = ed.edit('Remove slam kicks', c => ed.removeSlamKicks(c, list));
+			toast(n + ' keyframe' + (n === 1 ? '' : 's') + ' removed');
+		}
+		closeModal(); buildOptbar();
+	};
+	showModal(add ? 'Add slam kicks' : 'Remove slam kicks', h('div', null,
+		h('div', { class: 'note' }, add
+			? 'A kick makes the lane jump sideways in the direction of the slam (Zoom Side), then ease back. It is written as ordinary Zoom Side keyframes, so you can move, edit or delete them like any other keyframe. Slams that already have Zoom Side keyframes nearby are skipped.'
+			: 'Removes Zoom Side keyframes that jump on a slam and return to the same value (what "Add slam kicks" creates).'),
+		row('Apply to', scope),
+		add ? row('Amount', amt, h('span', { class: 'muted' }, 'zoom_side units (±)')) : null,
+		add ? row('Ease back over', len, h('span', { class: 'muted' }, 'measures (e.g. 1/8)')) : null,
+		h('div', { class: 'btns' }, h('button', { class: 'on', onclick: go }, add ? 'Add kicks' : 'Remove kicks'), h('button', { onclick: closeModal }, 'Cancel'))));
 }
 
 // ---------------------------------------------------------------- files
@@ -3655,6 +5208,71 @@ function exportV1() {
 	const r = K.exportKsh(ed.chart, { v1: true });
 	download(fileNameNoExt() + '_ksm_v1.ksh', r.text);
 	toast(r.warnings.length ? 'Exported for KSM v1. ' + r.warnings.map(w => w.msg).join(' ') : 'Exported for KSM v1 (nothing needed converting).');
+}
+function exportUsc() {
+	const r = K.exportKsh(ed.chart, { usc: true });
+	download(fileNameNoExt() + '_usc.ksh', r.text);
+	showWarnings('Exported for USC', 'Saved ' + fileNameNoExt() + '_usc.ksh. Put it in the song folder next to the audio file (' + (ed.chart.meta.m || 'music file') + ').', r.warnings, 'USC reads curves as straight steps, scroll_speed as a percentage and has no rotation_deg, so those were converted. Nothing else changed.');
+}
+function showWarnings(title, lead, warnings, okNote) {
+	const list = warnings.length ? h('ul', { class: 'warnlist' }, warnings.map(w => h('li', null, (w.t ? posLabel(ed.timing, w.t, ed.div) + ': ' : '') + w.msg))) : h('div', { class: 'note' }, okNote || 'Nothing needed converting.');
+	showModal(title, h('div', null, h('div', { class: 'note' }, lead), list, h('div', { class: 'btns' }, h('button', { class: 'on', onclick: closeModal }, 'OK'))));
+}
+function exportSdvxDialog() {
+	const m = ed.chart.meta, S = ed.settings;
+	const sanitize = (s) => String(s || '').normalize('NFKD').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase().slice(0, 32);
+	const f = {};
+	const inp = (k, v, w, ph) => (f[k] = h('input', { type: 'text', value: v ?? '', placeholder: ph || '', style: 'width:' + (w || '200px') }));
+	const sel = (k, opts, v) => { f[k] = h('select', null, opts.map(([a, b]) => h('option', { value: a }, b))); f[k].value = v; return f[k]; };
+	const bpms = ed.chart.bpm.map(b => b.v);
+	const slotDef = SDVX.KSH_DIFF_SLOT[m.difficulty] || 'maximum';
+	const jacket = h('input', { type: 'file', accept: 'image/*' });
+	const hasAudio = !!(ed.audio.srcBytes);
+	const audioChk = h('input', { type: 'checkbox', checked: hasAudio, disabled: !hasAudio });
+	const x10 = h('input', { type: 'checkbox', checked: !!S.sdvxLevelX10 });
+	const body = h('div', { class: 'sdvx-export' },
+		h('div', { class: 'note' }, 'Makes a .zip for data_mods: music/<id>_<name>/ with the .vox chart, the song and preview as .2dx, jackets, and others/music_db.merged.xml with the song entry. Settings are remembered.'),
+		row('Song ID', inp('id', S.sdvxId || 2000, '80px'), h('span', { class: 'muted' }, 'must not clash with other songs')),
+		row('ASCII name', inp('ascii', S.sdvxAscii || sanitize(m.title_translit || m.title) || 'custom', '160px'), h('span', { class: 'muted' }, 'letters, digits, _ and -')),
+		row('Chart slot', sel('slot', SDVX.SLOTS.map(s => [s.id, s.label]), slotDef)),
+		row('INF slot type', sel('inf', [['2', 'INF'], ['3', 'GRV'], ['4', 'HVN'], ['5', 'VVD'], ['6', 'XCD']], String(S.sdvxInf || 6)), h('span', { class: 'muted' }, 'only for slot 4')),
+		row('Level', inp('level', m.level || '1', '50px'), h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, x10, '×10 (∇ format, 19.5 → 195)')),
+		row('Game version', sel('version', [['1', '1 BOOTH'], ['2', '2 II'], ['3', '3 III'], ['4', '4 IV'], ['5', '5 V'], ['6', '6 EXCEED GEAR'], ['7', '7 ∇']], String(S.sdvxVersion || 6))),
+		row('Title', inp('title', m.title, '220px')), row('Title (yomigana)', inp('titleYomi', S.sdvxTitleYomi || '', '220px', 'reading in katakana, optional')),
+		row('Artist', inp('artist', m.artist, '220px')), row('Artist (yomigana)', inp('artistYomi', '', '220px', 'optional')),
+		row('Illustrator', inp('illustrator', m.illustrator, '160px')), row('Effected by', inp('effector', m.effect, '160px')),
+		row('BPM range', inp('bpmMin', K.fmtNum(Math.min(...bpms)), '60px'), h('span', { class: 'muted' }, 'to'), inp('bpmMax', K.fmtNum(Math.max(...bpms)), '60px')),
+		row('Music volume', inp('volume', S.sdvxVolume || 91, '50px'), h('span', { class: 'muted' }, 'music_db volume (game default 91)')),
+		row('Laser right edge', sel('edge', [['124', '124 (same as your 2811 files)'], ['127', '127 (full VOX range)']], String(S.sdvxEdge || 124))),
+		row('Jacket image', jacket),
+		row('Song audio', h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, audioChk, hasAudio ? 'make .2dx from ' + ed.audio.fileName : 'load the song first to make .2dx files')),
+		row('Preview', h('span', { class: 'muted' }, 'from ' + ((parseInt(m.po, 10) || 0) / 1000).toFixed(1) + ' s for ' + (((parseInt(m.plength, 10) || 15000)) / 1000).toFixed(1) + ' s (po / plength in the Chart tab)')),
+		h('div', { class: 'note' }, 'The chart offset (o = ' + (m.o || 0) + ' ms) is applied to the audio so measure 1 starts at 0:00, since SDVX has no offset setting.'));
+	const status = h('div', { class: 'note' });
+	const go = async () => {
+		const id = parseInt(f.id.value, 10), ascii = f.ascii.value.trim();
+		if (!(id > 0 && id < 10000)) return toast('Song ID must be 1–9999', true);
+		if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(ascii)) return toast('ASCII name: letters, digits, _ and - only', true);
+		const lv = parseFloat(f.level.value) || 1;
+		Object.assign(S, { sdvxId: id, sdvxAscii: ascii, sdvxInf: +f.inf.value, sdvxVersion: +f.version.value, sdvxVolume: parseInt(f.volume.value, 10) || 91, sdvxEdge: +f.edge.value, sdvxLevelX10: x10.checked });
+		ed.saveSettings();
+		btn.disabled = true;
+		try {
+			const r = await SDVX.buildPackage(ed.chart, {
+				id, ascii, slot: f.slot.value, infVer: f.slot.value === 'infinite' ? +f.inf.value : (f.slot.value === 'maximum' ? 0 : 0),
+				difnum: Math.round(x10.checked ? lv * 10 : lv), version: +f.version.value, volume: K.clamp(parseInt(f.volume.value, 10) || 91, 0, 127),
+				laserEdge: +f.edge.value, title: f.title.value, artist: f.artist.value, titleYomi: f.titleYomi.value, artistYomi: f.artistYomi.value,
+				illustrator: f.illustrator.value, effector: f.effector.value, bpmMin: parseFloat(f.bpmMin.value) || bpms[0], bpmMax: parseFloat(f.bpmMax.value) || bpms[0],
+				jacket: jacket.files[0] || null, audioBytes: audioChk.checked ? ed.audio.srcBytes : null,
+				offsetMs: parseInt(m.o, 10) || 0, previewMs: (parseInt(m.po, 10) || 0), previewLen: parseInt(m.plength, 10) || 15000,
+			}, (msg) => { status.textContent = msg; });
+			const name = String(id).padStart(4, '0') + '_' + ascii + '_sdvx.zip';
+			const a = h('a', { href: URL.createObjectURL(r.blob), download: name }); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+			showWarnings('SOUND VOLTEX export', 'Saved ' + name + ' (' + r.files.length + ' files). Copy the folder inside it to your data_mods folder.', r.warnings, 'Everything converted.');
+		} catch (e) { console.error(e); toast('Export failed: ' + (e.message || e), true); btn.disabled = false; }
+	};
+	const btn = h('button', { class: 'on', onclick: go }, 'Export .zip');
+	showModal('Export for SOUND VOLTEX', h('div', null, body, status, h('div', { class: 'btns' }, btn, h('button', { onclick: closeModal }, 'Cancel'))));
 }
 function viewKsh() {
 	const { text } = K.exportKsh(ed.chart);
@@ -3765,7 +5383,7 @@ window.addEventListener('keydown', (e) => {
 		else if (lk === 'c') { e.preventDefault(); ed.copy(); }
 		else if (lk === 'x') { e.preventDefault(); ed.copy(true); }
 		else if (lk === 'v') { e.preventDefault(); ed.paste(e.shiftKey); }
-		else if (lk === 'a') { e.preventDefault(); ed.selectAll(); }
+		else if (lk === 'a') { e.preventDefault(); ed.selectAll(e.shiftKey); }
 		else if (lk === 'm') { e.preventDefault(); ed.mirrorSelection(); }
 		else if (lk === 'n') { e.preventDefault(); newChart(); }
 		else if (k === 'ArrowUp') { e.preventDefault(); changeDiv(1); }
@@ -3834,7 +5452,7 @@ function frame() {
 		const t0 = performance.now();
 		ed.needDraw = false;
 		tl.draw();
-		if (ed.settings.showPreview) { pv.draw(ed.playing ? ed.playTick : ed.cursor); previewFrames = 30; }
+		if (ed.settings.showPreview) { pv.draw(ed.playing ? ed.playTick : ed.cursor, ed.playing); previewFrames = 30; }
 		updateTransport();
 		const dt = performance.now() - t0; perf.frames++; perf.sum += dt; perf.worst = Math.max(perf.worst, dt);
 	} else if (previewFrames > 0 && ed.settings.showPreview) { previewFrames--; pv.draw(ed.cursor); }
@@ -3843,7 +5461,7 @@ function frame() {
 setInterval(() => ed.scheduleHits(), 20);
 
 // ---------------------------------------------------------------- boot
-buildMenus(); buildToolbox(); buildOptbar(); buildTransport(); buildTabs();
+buildMenus(); buildToolbox(); buildOptbar(); buildTransport(); buildTabs(); syncSpeedUI();
 $('#previewPane').classList.toggle('hidden', !ed.settings.showPreview);
 (() => {
 	const a = readAutosave();

@@ -42,8 +42,9 @@ function popover(cx, cy, title, fields, onOk) {
 	const el = $('#popover');
 	el.innerHTML = '';
 	el.append(h('h5', null, title));
-	const inputs = {}, rows = [];
+	const inputs = {}, rows = [], notes = [];
 	for (const f of fields) {
+		if (f.type === 'note') { const n = h('div', { class: 'note', style: 'max-width:300px;margin:0 0 6px' }); notes.push([n, f]); el.append(n); continue; }
 		let inp;
 		if (f.type === 'select') { inp = h('select', null, f.options.map(([v, l]) => h('option', { value: v }, l))); inp.value = f.value; }
 		else inp = h('input', { type: f.type === 'number' ? 'text' : 'text', value: f.value, inputmode: f.type === 'number' ? 'decimal' : undefined });
@@ -54,7 +55,7 @@ function popover(cx, cy, title, fields, onOk) {
 		if (f.hint) el.append(h('div', { class: 'note', style: 'margin:-2px 0 4px 86px' }, f.hint));
 	}
 	const read = () => Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, i.value]));
-	const vis = () => { const v = read(); for (const [r, f] of rows) { const show = !f.show || f.show(v); r.style.display = show ? '' : 'none'; if (r.nextSibling && r.nextSibling.classList && r.nextSibling.classList.contains('note')) r.nextSibling.style.display = show ? '' : 'none'; } };
+	const vis = () => { const v = read(); for (const [n, f] of notes) n.textContent = typeof f.value === 'function' ? f.value(v) : f.value; for (const [r, f] of rows) { const show = !f.show || f.show(v); r.style.display = show ? '' : 'none'; if (r.nextSibling && r.nextSibling.classList && r.nextSibling.classList.contains('note')) r.nextSibling.style.display = show ? '' : 'none'; } };
 	el.addEventListener('input', vis); el.addEventListener('change', vis); vis();
 	const close = () => { el.classList.add('hidden'); popoverClose = null; $('#timeline').focus(); };
 	const ok = () => { const v = read(); close(); onOk(v); };
@@ -73,6 +74,7 @@ function popover(cx, cy, title, fields, onOk) {
 const ed = new Editor();
 const tl = new TimelineView($('#timeline'), ed); ed.tl = tl;
 const pv = new Preview3D($('#preview'), ed);
+ed.preview = pv;
 let currentTab = 'props';
 
 function fileNameNoExt() { return (ed.fileName || 'chart.ksh').replace(/\.ksh$/i, ''); }
@@ -96,6 +98,8 @@ function buildMenus() {
 			['Save .ksh', 'Ctrl+S', () => save(false)],
 			['Save .ksh as…', 'Ctrl+Shift+S', () => save(true)],
 			['Export for KSM v1 (bake curves)…', '', exportV1],
+			['Export for USC (unnamed sdvx clone)…', '', exportUsc],
+			['Export for SOUND VOLTEX (.vox + .2dx)…', '', exportSdvxDialog],
 			['View .ksh text…', '', viewKsh],
 			'-',
 			['Restore autosave', '', restoreAutosave],
@@ -103,7 +107,8 @@ function buildMenus() {
 		['Edit', [
 			['Undo', 'Ctrl+Z', () => ed.undo()], ['Redo', 'Ctrl+Y', () => ed.redo()], '-',
 			['Cut', 'Ctrl+X', () => ed.copy(true)], ['Copy', 'Ctrl+C', () => ed.copy()], ['Paste at cursor', 'Ctrl+V', () => ed.paste(false)], ['Paste mirrored', 'Ctrl+Shift+V', () => ed.paste(true)],
-			['Delete', 'Del', () => ed.deleteSelection()], ['Select all notes', 'Ctrl+A', () => ed.selectAll()], '-',
+			['Delete', 'Del', () => ed.deleteSelection()], ['Select all notes', 'Ctrl+A', () => ed.selectAll()], ['Select everything', 'Ctrl+Shift+A', () => ed.selectAll(true)], '-',
+			['Add slam kicks…', '', () => slamKickDialog(true)], ['Remove slam kicks…', '', () => slamKickDialog(false)], '-',
 			['Mirror selection', 'Ctrl+M', () => ed.mirrorSelection()], ['Move selection up a step', 'Alt+↑', () => ed.nudgeSelection(1)], ['Move selection down a step', 'Alt+↓', () => ed.nudgeSelection(-1)],
 		]],
 		['View', [
@@ -184,7 +189,8 @@ function buildOptbar() {
 		const cv = h('select', { title: 'Curve for new segments (KSM v2)', onchange: (e) => { ed.newCurve = e.target.value; } }, K.CURVE_PRESETS.map(p => h('option', { value: p.id }, p.label)));
 		cv.value = ed.newCurve;
 		const wide = h('button', { class: ed.newWide ? 'on' : '', title: 'New lasers are wide (laserrange 2x)', onclick: () => { ed.newWide = !ed.newWide; wide.classList.toggle('on', ed.newWide); } }, '2x wide');
-		ob.append(h('div', { class: 'grp' }, h('label', null, 'Positions'), ls), h('div', { class: 'grp' }, h('label', null, 'Curve'), cv), wide);
+		const kick = h('button', { class: ed.settings.autoKick ? 'on' : '', title: 'New slams also get a zoom_side "kick": the lane jumps in the slam\'s direction and eases back. The kick is made of normal Zoom Side keyframes you can move or delete.', onclick: () => { ed.settings.autoKick = !ed.settings.autoKick; ed.saveSettings(); kick.classList.toggle('on', ed.settings.autoKick); } }, 'Slam kick ±' + (ed.settings.kickAmount || 30));
+		ob.append(h('div', { class: 'grp' }, h('label', null, 'Positions'), ls), h('div', { class: 'grp' }, h('label', null, 'Curve'), cv), wide, kick);
 		hint = 'Drag: draw a laser · Drag from its end point: continue · Drag sideways: slam · Drag a point: move · Alt: no snap';
 	}
 	ob.append(h('div', { class: 'hint' }, hint));
@@ -198,8 +204,10 @@ function fxEditor(value, onChange, opts = {}) {
 	const preset = K.FX_EFFECTS.find(f => f.name === name);
 	const mode = !value ? '' : preset ? name : defs.includes(name) ? 'def:' + name : 'custom';
 	const wrap = h('span', { class: 'ctl', style: 'display:inline-flex;gap:4px;align-items:center' });
-	const sel = h('select', null, h('option', { value: '' }, '(no effect)'), K.FX_EFFECTS.map(f => h('option', { value: f.name }, f.name)), defs.map(d => h('option', { value: 'def:' + d }, d + ' (custom)')), h('option', { value: 'custom' }, 'Other…'));
+	const sel = h('select', null, h('option', { value: '' }, '(no effect)'), K.FX_EFFECTS.map(f => h('option', { value: f.name, title: FX_HELP[f.name] || '' }, f.name)), defs.map(d => h('option', { value: 'def:' + d }, d + ' (custom)')), h('option', { value: 'custom' }, 'Other…'));
 	sel.value = mode;
+	const tip = () => { sel.title = FX_HELP[sel.value] || 'Effect applied to the music while this FX hold is held'; };
+	tip(); sel.addEventListener('change', tip);
 	const params = h('span', { style: 'display:inline-flex;gap:3px' });
 	const custom = h('input', { type: 'text', value: mode === 'custom' ? value : '', placeholder: 'e.g. Retrigger;16', style: 'width:110px' });
 	const emit = () => {
@@ -225,6 +233,45 @@ function fxEditor(value, onChange, opts = {}) {
 
 // ---------------------------------------------------------------- transport
 const TR = {};
+// what each FX hold effect does (tooltips); parameters follow KSM / USC
+const FX_HELP = {
+	Retrigger: 'Retrigger: repeats a short slice of the music over and over. Wave 1/n = slice length (8 = 1/8 note).',
+	Gate: 'Gate: chops the music on and off. Wave 1/n = how often (8 = every 1/8 note).',
+	Flanger: 'Flanger: sweeping "jet plane" whoosh.',
+	PitchShift: 'PitchShift: raises the pitch by n semitones (12 = one octave up).',
+	BitCrusher: 'BitCrusher: crunchy lo-fi sound. Bigger reduction = crunchier.',
+	Phaser: 'Phaser: slow swirling sweep.',
+	Wobble: 'Wobble: a low-pass filter that wobbles. Wave 1/n = speed (12 = every 1/12 note).',
+	TapeStop: 'TapeStop: the music slows down to a stop like a tape deck. Higher speed = stops faster.',
+	Echo: 'Echo: repeats what was playing every 1/n note, fading by the feedback %.',
+	SideChain: 'SideChain: ducks the volume on every beat (pumping).',
+};
+const FILTER_LABEL = { peak: 'peaking filter (default)', lpf1: 'low-pass', hpf1: 'high-pass', bitc: 'bitcrusher' };
+// ---- preview pane: speed control + resize
+function syncSpeedUI() {
+	const S = ed.settings, el = $('#pvSpeed'); if (!el) return;
+	const hs = S.speedMode === 'hs';
+	// mod mode is shown like SDVX EG's LANE-SPEED (BPM x hi-speed / 100)
+	const get = () => hs ? S.hiSpeed : S.modSpeed / 100;
+	const step = hs ? 0.25 : 0.25, lo = hs ? 0.5 : 1, hi = 20;
+	const set = (v) => { v = Math.round(K.clamp(v, lo, hi) * 100) / 100; if (hs) S.hiSpeed = v; else S.modSpeed = Math.round(v * 100); ed.saveSettings(); inp.value = get().toFixed(2); ed.requestDraw(); if (currentTab === 'settings') renderTab(true); };
+	const inp = h('input', { type: 'text', inputmode: 'decimal', value: get().toFixed(2), title: hs ? 'Hi-speed multiplier' : 'Lane speed = BPM × hi-speed ÷ 100, reached at the chart\'s main BPM (like SDVX EG)', onchange: (e) => set(parseFloat(e.target.value) || get()) });
+	el.replaceChildren(
+		h('span', { class: 'lbl', title: 'Click to switch between lane speed and a fixed hi-speed multiplier', onclick: () => { S.speedMode = hs ? 'mod' : 'hs'; ed.saveSettings(); syncSpeedUI(); ed.requestDraw(); if (currentTab === 'settings') renderTab(true); } }, hs ? 'HS' : 'SPEED'),
+		h('button', { title: 'Slower', onclick: () => set(get() - step) }, '−'), inp, h('button', { title: 'Faster', onclick: () => set(get() + step) }, '+'));
+}
+(() => {
+	const pane = $('#previewPane'), grip = $('#pvResize');
+	pane.style.width = (ed.settings.previewW || 320) + 'px';
+	grip.addEventListener('pointerdown', (e) => {
+		e.preventDefault(); grip.setPointerCapture(e.pointerId); grip.classList.add('on');
+		const x0 = e.clientX, w0 = pane.getBoundingClientRect().width;
+		const move = (ev) => { const w = Math.round(K.clamp(w0 + ev.clientX - x0, 180, Math.min(900, window.innerWidth * 0.6))); pane.style.width = w + 'px'; ed.settings.previewW = w; tl.resize(); pv.resize(); ed.requestDraw(); };
+		const up = () => { grip.classList.remove('on'); grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); ed.saveSettings(); };
+		grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up);
+	});
+})();
+
 function buildTransport() {
 	const t = $('#transport'); t.innerHTML = '';
 	TR.start = h('button', { class: 'ibtn', title: 'Go to start (Home)', html: ICONS.start, onclick: () => moveCursor(0) });
@@ -330,7 +377,7 @@ function renderProps(body) {
 		for (const e of items) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
 		const fxHolds = items.filter(e => e.kind === 'fx' && e.item.l > 0);
 		body.append(sec(items.length + ' selected',
-			h('div', { class: 'note' }, Object.entries(kinds).map(([k, n]) => n + ' ' + ({ bt: 'BT', fx: 'FX', lpt: 'laser point', cam: 'keyframe', bpm: 'BPM', stop: 'stop', spin: 'spin', sig: 'beat' }[k] || k) + (n > 1 ? 's' : '')).join(', ')),
+			h('div', { class: 'note' }, Object.entries(kinds).map(([k, n]) => n + ' ' + ({ bt: 'BT', fx: 'FX', lpt: 'laser point', cam: 'keyframe', bpm: 'BPM', stop: 'stop', spin: 'spin', sig: 'beat', ev: 'event' }[k] || k) + (n > 1 ? 's' : '')).join(', ')),
 			fxHolds.length ? row('FX hold effect', fxEditor(fxHolds[0].item.fx || '', (v) => ed.edit('Set FX effect', c => { for (const e of fxHolds) { const arr = c.fx[e.lane]; const n = arr.find(o => o.id === e.item.id); if (n) ed.replaceIn(arr, n.id, v ? { ...n, fx: v } : (({ fx, ...r }) => r)(n)); } }))) : null,
 			h('div', { class: 'btns' }, h('button', { onclick: () => ed.mirrorSelection() }, 'Mirror (Ctrl+M)'), h('button', { onclick: () => ed.copy() }, 'Copy'), h('button', { onclick: () => ed.deleteSelection() }, 'Delete'))));
 		return;
@@ -381,6 +428,10 @@ function renderProps(body) {
 			const seSel = h('select', { onchange: (ev) => ed.edit('Slam sound', c => { c.slamSE = c.slamSE.filter(x => x.t !== t); if (ev.target.value) K.insertSorted(c.slamSE, { id: K.nid(), t, v: ev.target.value }); }) }, h('option', { value: '' }, '(default)'), K.SLAM_SOUNDS.map(x => h('option', { value: x }, x)));
 			seSel.value = seCur ? seCur.v : '';
 			box.append(row('Slam sound', seSel));
+			const zk = ed.chart.cam.zoom_side.find(x => x.t === t && typeof x.vf === 'number' && x.vf !== x.v);
+			box.append(row('Zoom side kick', zk
+				? h('span', null, h('span', { class: 'muted' }, (zk.vf - zk.v > 0 ? '+' : '') + K.fmtNum(zk.vf - zk.v) + ' '), h('button', { onclick: () => ed.edit('Remove slam kick', c => ed.removeSlamKicks(c, [{ t }])) }, 'Remove'))
+				: h('button', { onclick: () => { const n = ed.edit('Add slam kick', c => ed.addSlamKicks(c, ed.slamList(c, new Set([p.id])))); if (!n) toast('This slam already has Zoom Side keyframes nearby'); } }, 'Add kick ±' + (ed.settings.kickAmount || 30))));
 		}
 		body.append(box);
 		// spin / swing editor on this tick
@@ -400,9 +451,27 @@ function renderProps(body) {
 		if (sp && sp.kind === 'swing') spinSec.append(row('Swing', amp, rep, dec));
 		body.append(spinSec);
 		const wide = h('input', { type: 'checkbox', checked: !!s.wide, onchange: (ev) => ed.edit('Wide laser', c => { const arr = c.laser[lane]; const so = arr.find(x => x.id === s.id); if (so) ed.replaceIn(arr, so.id, { ...so, wide: ev.target.checked }); }) });
+		const tiltSel = h('select', { title: 'What the game\'s automatic laser tilt does while this laser plays', onchange: (ev) => ed.setLaserTiltMode(s, ev.target.value) },
+			h('option', { value: 'inherit' }, 'Automatic (no change)'), h('option', { value: 'zero' }, 'Off for this laser (tilt=zero)'),
+			['normal', 'bigger', 'biggest', 'keep_normal', 'keep_bigger', 'keep_biggest'].map(m => h('option', { value: m }, m)));
+		tiltSel.value = ed.laserTiltMode(s);
+		const defs = KSMFX.parseDefines(ed.chart.defs);
+		const filters = ['peak', 'lpf1', 'hpf1', 'bitc', ...Object.keys(defs).filter(k => k.startsWith('filter:')).map(k => k.slice(7))];
+		const curF = ed.stepAt(ed.chart.filterType, s.t, ed.chart.meta.filtertype || 'peak');
+		const atF = ed.chart.filterType.find(x => x.t === s.t);
+		const fSel = h('select', { onchange: (ev) => ed.setStepAt('filterType', s.t, ev.target.value === '-' ? null : ev.target.value, 'Laser effect') },
+			h('option', { value: '-' }, 'Keep current (' + curF + ')'), filters.map(f => h('option', { value: f }, FILTER_LABEL[f] ? f + ' — ' + FILTER_LABEL[f] : f)));
+		fSel.value = atF ? atF.v : '-';
+		const curG = ed.stepAt(ed.chart.pfilterGain, s.t, ed.chart.meta.pfiltergain || '50');
+		const atG = ed.chart.pfilterGain.find(x => x.t === s.t);
+		const gIn = numInput(atG ? atG.v : '', (v) => ed.setStepAt('pfilterGain', s.t, v === '' ? null : K.clamp(parseInt(v, 10) || 0, 0, 100), 'Laser effect strength'), { style: 'width:50px', placeholder: String(curG), title: 'pfiltergain 0–100 from this laser on (empty = keep ' + curG + ')' });
 		body.append(sec('Whole laser',
 			row('Starts', h('span', null, pos(s.t))),
 			row('Wide (2x)', wide, h('span', { class: 'muted' }, 'laserrange_' + (lane ? 'r' : 'l') + '=2x')),
+			row('Engine tilt', tiltSel),
+			row('Laser effect', fSel),
+			row('Effect strength', gIn, h('span', { class: 'muted' }, '% (pfiltergain)')),
+			h('div', { class: 'note' }, 'Engine tilt: the game tilts the lane toward the lasers on its own (±10°, shown as the dashed line in the Tilt column). "Off" writes tilt=zero at the start of this laser and restores the previous mode at its end. Laser effect / strength are written as filtertype / pfiltergain at the start of this laser and stay until changed.'),
 			h('div', { class: 'btns' },
 				h('button', { onclick: () => ed.setSel(s.pts.map(q => q.id)) }, 'Select all points'),
 				h('button', { onclick: () => ed.edit('Delete point', () => ed.deleteLaserPoints(new Set([p.id]))) }, 'Delete point'),
@@ -412,7 +481,7 @@ function renderProps(body) {
 	if (e.kind === 'cam') {
 		const p = e.item, key = e.key, isTilt = key === 'tilt';
 		const upd = (label, fn) => ed.edit(label, () => { const arr = ed.camArr(key).slice(); const o = arr.find(x => x.id === p.id); if (!o) return; const np = fn({ ...o }); ed.replaceIn(arr, o.id, np); ed.setCamArr(key, arr); });
-		const box = sec(COL_INFO[key].label + ' keyframe', row('Position', h('span', null, pos(p.t))));
+		const box = sec(COL_INFO[key].label + ' keyframe', h('div', { class: 'note' }, EVENT_HELP[key].short), row('Position', h('span', null, pos(p.t))));
 		if (isTilt) {
 			const mode = h('select', { onchange: (ev) => upd('Tilt type', q => { q.v = ev.target.value === 'manual' ? 0 : ev.target.value; if (typeof q.v !== 'number') { delete q.vf; q.a = 0; q.b = 0; } return q; }) }, h('option', { value: 'manual' }, 'Manual value'), K.TILT_AUTO.map(a => h('option', { value: a }, 'Auto: ' + a)));
 			mode.value = typeof p.v === 'number' ? 'manual' : p.v;
@@ -433,10 +502,23 @@ function renderProps(body) {
 		body.append(box);
 		return;
 	}
-	if (e.kind === 'bpm') { body.append(sec('BPM change', row('Position', h('span', null, pos(e.item.t))), row('BPM', numInput(K.fmtNum(e.item.v), (v) => { const b = parseFloat(v); if (b > 0) ed.setBpmAt(e.item.t, b); })))); return; }
-	if (e.kind === 'stop') { body.append(sec('Stop', row('Position', h('span', null, pos(e.item.t))), row('Length', numInput(fmtLen(e.item.l), (v) => { const l = parseLen(v); if (l > 0) ed.edit('Edit stop', c => ed.replaceIn(c.stops, e.item.id, { ...e.item, l })); }), h('span', { class: 'muted' }, 'measures')))); return; }
-	if (e.kind === 'sig') { body.append(sec('Time signature', row('Measure', h('span', null, e.item.m + 1)), row('Beats', numInput(e.item.n + '/' + e.item.d, (v) => { const [n, d] = v.split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) ed.setSigAt(e.item.m, n, d); })))); return; }
-	if (e.kind === 'spin') { const s = e.item; body.append(sec('Spin / swing', row('Position', h('span', null, pos(s.t))), row('Effect', (() => { const sl = h('select', { onchange: (ev) => ed.setSpinAt(s.t, ev.target.value, s.l, s) }, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l))); sl.value = spinCode(s); return sl; })()), row('Length', numInput(fmtLen(s.l), (v) => { const l = parseLen(v); if (l > 0) ed.setSpinAt(s.t, spinCode(s), l, s); }), h('span', { class: 'muted' }, 'measures')))); }
+	if (e.kind === 'ev') {
+		const it = e.item, key = e.key, Hh = EVENT_HELP[key];
+		const box = sec(Hh.title + (Hh.ksh ? ' · ' + Hh.ksh : ''), row('Position', h('span', null, pos(it.t))));
+		if (key === 'filterType') {
+			const sl = h('select', { onchange: (ev) => ed.setEvent(key, it.id, { v: ev.target.value }, 'Laser effect') }, [...new Set([it.v, 'peak', 'lpf1', 'hpf1', 'bitc'])].map(v => h('option', { value: v }, FILTER_LABEL[v] ? v + ' — ' + FILTER_LABEL[v] : v)));
+			sl.value = it.v; box.append(row('Effect', sl));
+		} else if (key === 'pfilterGain' || key === 'slamVol') box.append(row('Value', numInput(it.v, (v) => ed.setEvent(key, it.id, { v: String(K.clamp(parseInt(v, 10) || 0, 0, 100)) }), { style: 'width:60px' }), h('span', { class: 'muted' }, '0–100')));
+		else if (key === 'slamSE') { const sl = h('select', { onchange: (ev) => ed.setEvent(key, it.id, { v: ev.target.value }, 'Slam sound') }, K.SLAM_SOUNDS.map(v => h('option', { value: v }, v))); sl.value = it.v; box.append(row('Sound', sl)); }
+		else if (key === 'raw') { box.append(row('Key', numInput(it.k, (v) => ed.setEvent(key, it.id, { k: v }, 'Edit line'), { style: 'width:120px' })), row('Value', numInput(it.v, (v) => ed.setEvent(key, it.id, { v }, 'Edit line'), { style: 'width:160px' }))); }
+		box.append(h('div', { class: 'note' }, Hh.short), h('div', { class: 'btns' }, h('button', { onclick: () => ed.copy() }, 'Copy'), h('button', { onclick: () => ed.deleteSelection() }, 'Delete')));
+		body.append(box); return;
+	}
+	const helpNote = (k) => h('div', { class: 'note' }, EVENT_HELP[k].short);
+	if (e.kind === 'bpm') { body.append(sec('BPM change', helpNote('bpm'), row('Position', h('span', null, pos(e.item.t))), row('BPM', numInput(K.fmtNum(e.item.v), (v) => { const b = parseFloat(v); if (b > 0) ed.setBpmAt(e.item.t, b); })))); return; }
+	if (e.kind === 'stop') { body.append(sec('Stop', helpNote('stops'), row('Position', h('span', null, pos(e.item.t))), row('Length', numInput(fmtLen(e.item.l), (v) => { const l = parseLen(v); if (l > 0) ed.edit('Edit stop', c => ed.replaceIn(c.stops, e.item.id, { ...e.item, l })); }), h('span', { class: 'muted' }, 'measures')))); return; }
+	if (e.kind === 'sig') { body.append(sec('Time signature', helpNote('sig'), row('Measure', h('span', null, e.item.m + 1)), row('Beats', numInput(e.item.n + '/' + e.item.d, (v) => { const [n, d] = v.split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) ed.setSigAt(e.item.m, n, d); })))); return; }
+	if (e.kind === 'spin') { const s = e.item; body.append(sec('Spin / swing', helpNote('spins'), row('Position', h('span', null, pos(s.t))), row('Effect', (() => { const sl = h('select', { onchange: (ev) => ed.setSpinAt(s.t, ev.target.value, s.l, s) }, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l))); sl.value = spinCode(s); return sl; })()), row('Length', numInput(fmtLen(s.l), (v) => { const l = parseLen(v); if (l > 0) ed.setSpinAt(s.t, spinCode(s), l, s); }), h('span', { class: 'muted' }, 'measures')))); }
 }
 
 function renderChartTab(body) {
@@ -530,7 +612,7 @@ function renderCheck(body) {
 
 function renderSettings(body) {
 	const S = ed.settings;
-	const save = () => { ed.saveSettings(); ed.applyAudioSettings(); tl.layout(); ed.requestDraw(); };
+	const save = () => { ed.saveSettings(); ed.applyAudioSettings(); tl.layout(); ed.requestDraw(); syncSpeedUI(); };
 	const slider = (k, min, max, step, fmt) => { const out = h('span', { class: 'muted', style: 'min-width:42px' }, fmt(S[k])); return [h('input', { type: 'range', min, max, step, value: S[k], style: 'flex:1', oninput: (e) => { S[k] = +e.target.value; out.textContent = fmt(S[k]); save(); } }), out]; };
 	const chk = (k, after) => h('input', { type: 'checkbox', checked: S[k], onchange: (e) => { S[k] = e.target.checked; save(); if (after) after(); } });
 	const pct = v => Math.round(v * 100) + '%';
@@ -538,18 +620,59 @@ function renderSettings(body) {
 		row('Music volume', ...slider('volMusic', 0, 1, 0.01, pct)),
 		row('Hitsound volume', ...slider('volHit', 0, 1, 0.01, pct)),
 		row('Metronome volume', ...slider('volMetro', 0, 1, 0.01, pct)),
+		row('Game sounds volume', ...slider('volGame', 0, 1, 0.01, pct)),
 		row('Hitsounds', chk('hitsounds', () => TR.hits.classList.toggle('on', S.hitsounds))),
+		row('Slam & FX chip sounds', chk('gameSounds')),
+		row('Play FX effects', chk('playFx')),
+		h('div', { class: 'note' }, 'Hitsounds are editor ticks for every note. Slam & FX chip sounds are the sounds the game plays (chokkakuse / chokkakuvol, fx-l_se / fx-r_se). "Play FX effects" applies FX hold effects and the laser filter to the music the way USC does, so you hear Retrigger, Gate, Flanger, peak/LPF/HPF/bitcrush etc. while editing.'),
 		row('Click when placing', chk('placeSound')),
 		row('Visual latency', ...slider('latencyMs', -150, 150, 1, v => v + ' ms')),
 		h('div', { class: 'note' }, 'Playback timing comes from the audio clock and already corrects for your output device. Only adjust latency if the cursor still looks early (+) or late (−) against what you hear, e.g. with Bluetooth headphones.')));
 	body.append(sec('View',
 		row('Lane width', ...slider('laneW', 26, 80, 1, v => v + ' px')),
-		row('Preview note speed', ...slider('previewBeats', 2, 12, 0.5, v => v + ' beats')),
+		row('Preview speed', h('select', { onchange: (e) => { S.speedMode = e.target.value; save(); } }, h('option', { value: 'mod', selected: S.speedMode !== 'hs' }, 'Lane speed (like SDVX EG)'), h('option', { value: 'hs', selected: S.speedMode === 'hs' }, 'Hi-speed multiplier'))),
+		row('Lane speed', ...slider('modSpeed', 100, 2000, 5, v => (v / 100).toFixed(2))),
+		row('Hi-speed', ...slider('hiSpeed', 0.5, 20, 0.05, v => (+v).toFixed(2))),
+		row('Draw offset', ...slider('drawOffsetMs', -200, 200, 1, v => (v > 0 ? '+' : '') + v + ' ms')),
+		h('div', { class: 'note' }, 'Lane speed = BPM × hi-speed ÷ 100 at the chart\'s main BPM, so 8.00 looks the same in every chart, and faster BPM sections still scroll faster (as in game). The preview uses USC\'s camera, so the track, tilt, spins and zooms match USC. Draw offset is like the game\'s DRAW setting: + makes notes meet a point above the judgment line, − below it. It only moves the preview\'s notes; sound and the timeline are unaffected.'),
 		row('Show waveform', chk('showWave')),
 		row('Show preview', chk('showPreview', () => { $('#previewPane').classList.toggle('hidden', !S.showPreview); requestAnimationFrame(() => { tl.resize(); pv.resize(); }); })),
 		row('Follow playback', chk('follow')),
 		row('Invert mouse wheel', chk('invertWheel'))));
 	body.append(sec('Saving', row('Autosave (browser)', chk('autosave')), h('div', { class: 'note' }, 'Autosave keeps a copy of the chart in this browser every 15 s. Use File → Restore autosave to get it back.')));
+}
+
+// ---------------------------------------------------------------- slam kicks
+function slamKickDialog(add) {
+	const S = ed.settings;
+	const selSlams = ed.slamList(ed.chart, ed.sel);
+	const scope = h('select', null, h('option', { value: 'sel' }, 'Selected slams (' + selSlams.length + ')'), h('option', { value: 'all' }, 'All slams in the chart'));
+	scope.value = selSlams.length ? 'sel' : 'all';
+	const amt = h('input', { type: 'text', value: S.kickAmount || 30, style: 'width:60px' });
+	const len = h('input', { type: 'text', value: fmtLen(S.kickLen || 120), style: 'width:60px' });
+	const go = () => {
+		const list = scope.value === 'sel' ? selSlams : ed.slamList(ed.chart);
+		if (!list.length) { toast('No slams to change'); return; }
+		if (add) {
+			const A = parseFloat(amt.value), L = parseLen(len.value);
+			if (!(A > 0) || !(L > 0)) { toast('Enter an amount and a length'); return; }
+			S.kickAmount = A; S.kickLen = L; ed.saveSettings();
+			const n = ed.edit('Add slam kicks', c => ed.addSlamKicks(c, list, A, L));
+			toast(n + ' kick' + (n === 1 ? '' : 's') + ' added' + (n < new Set(list.map(x => x.t)).size ? ' (slams that already have Zoom Side keyframes were skipped)' : ''));
+		} else {
+			const n = ed.edit('Remove slam kicks', c => ed.removeSlamKicks(c, list));
+			toast(n + ' keyframe' + (n === 1 ? '' : 's') + ' removed');
+		}
+		closeModal(); buildOptbar();
+	};
+	showModal(add ? 'Add slam kicks' : 'Remove slam kicks', h('div', null,
+		h('div', { class: 'note' }, add
+			? 'A kick makes the lane jump sideways in the direction of the slam (Zoom Side), then ease back. It is written as ordinary Zoom Side keyframes, so you can move, edit or delete them like any other keyframe. Slams that already have Zoom Side keyframes nearby are skipped.'
+			: 'Removes Zoom Side keyframes that jump on a slam and return to the same value (what "Add slam kicks" creates).'),
+		row('Apply to', scope),
+		add ? row('Amount', amt, h('span', { class: 'muted' }, 'zoom_side units (±)')) : null,
+		add ? row('Ease back over', len, h('span', { class: 'muted' }, 'measures (e.g. 1/8)')) : null,
+		h('div', { class: 'btns' }, h('button', { class: 'on', onclick: go }, add ? 'Add kicks' : 'Remove kicks'), h('button', { onclick: closeModal }, 'Cancel'))));
 }
 
 // ---------------------------------------------------------------- files
@@ -647,6 +770,71 @@ function exportV1() {
 	const r = K.exportKsh(ed.chart, { v1: true });
 	download(fileNameNoExt() + '_ksm_v1.ksh', r.text);
 	toast(r.warnings.length ? 'Exported for KSM v1. ' + r.warnings.map(w => w.msg).join(' ') : 'Exported for KSM v1 (nothing needed converting).');
+}
+function exportUsc() {
+	const r = K.exportKsh(ed.chart, { usc: true });
+	download(fileNameNoExt() + '_usc.ksh', r.text);
+	showWarnings('Exported for USC', 'Saved ' + fileNameNoExt() + '_usc.ksh. Put it in the song folder next to the audio file (' + (ed.chart.meta.m || 'music file') + ').', r.warnings, 'USC reads curves as straight steps, scroll_speed as a percentage and has no rotation_deg, so those were converted. Nothing else changed.');
+}
+function showWarnings(title, lead, warnings, okNote) {
+	const list = warnings.length ? h('ul', { class: 'warnlist' }, warnings.map(w => h('li', null, (w.t ? posLabel(ed.timing, w.t, ed.div) + ': ' : '') + w.msg))) : h('div', { class: 'note' }, okNote || 'Nothing needed converting.');
+	showModal(title, h('div', null, h('div', { class: 'note' }, lead), list, h('div', { class: 'btns' }, h('button', { class: 'on', onclick: closeModal }, 'OK'))));
+}
+function exportSdvxDialog() {
+	const m = ed.chart.meta, S = ed.settings;
+	const sanitize = (s) => String(s || '').normalize('NFKD').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase().slice(0, 32);
+	const f = {};
+	const inp = (k, v, w, ph) => (f[k] = h('input', { type: 'text', value: v ?? '', placeholder: ph || '', style: 'width:' + (w || '200px') }));
+	const sel = (k, opts, v) => { f[k] = h('select', null, opts.map(([a, b]) => h('option', { value: a }, b))); f[k].value = v; return f[k]; };
+	const bpms = ed.chart.bpm.map(b => b.v);
+	const slotDef = SDVX.KSH_DIFF_SLOT[m.difficulty] || 'maximum';
+	const jacket = h('input', { type: 'file', accept: 'image/*' });
+	const hasAudio = !!(ed.audio.srcBytes);
+	const audioChk = h('input', { type: 'checkbox', checked: hasAudio, disabled: !hasAudio });
+	const x10 = h('input', { type: 'checkbox', checked: !!S.sdvxLevelX10 });
+	const body = h('div', { class: 'sdvx-export' },
+		h('div', { class: 'note' }, 'Makes a .zip for data_mods: music/<id>_<name>/ with the .vox chart, the song and preview as .2dx, jackets, and others/music_db.merged.xml with the song entry. Settings are remembered.'),
+		row('Song ID', inp('id', S.sdvxId || 2000, '80px'), h('span', { class: 'muted' }, 'must not clash with other songs')),
+		row('ASCII name', inp('ascii', S.sdvxAscii || sanitize(m.title_translit || m.title) || 'custom', '160px'), h('span', { class: 'muted' }, 'letters, digits, _ and -')),
+		row('Chart slot', sel('slot', SDVX.SLOTS.map(s => [s.id, s.label]), slotDef)),
+		row('INF slot type', sel('inf', [['2', 'INF'], ['3', 'GRV'], ['4', 'HVN'], ['5', 'VVD'], ['6', 'XCD']], String(S.sdvxInf || 6)), h('span', { class: 'muted' }, 'only for slot 4')),
+		row('Level', inp('level', m.level || '1', '50px'), h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, x10, '×10 (∇ format, 19.5 → 195)')),
+		row('Game version', sel('version', [['1', '1 BOOTH'], ['2', '2 II'], ['3', '3 III'], ['4', '4 IV'], ['5', '5 V'], ['6', '6 EXCEED GEAR'], ['7', '7 ∇']], String(S.sdvxVersion || 6))),
+		row('Title', inp('title', m.title, '220px')), row('Title (yomigana)', inp('titleYomi', S.sdvxTitleYomi || '', '220px', 'reading in katakana, optional')),
+		row('Artist', inp('artist', m.artist, '220px')), row('Artist (yomigana)', inp('artistYomi', '', '220px', 'optional')),
+		row('Illustrator', inp('illustrator', m.illustrator, '160px')), row('Effected by', inp('effector', m.effect, '160px')),
+		row('BPM range', inp('bpmMin', K.fmtNum(Math.min(...bpms)), '60px'), h('span', { class: 'muted' }, 'to'), inp('bpmMax', K.fmtNum(Math.max(...bpms)), '60px')),
+		row('Music volume', inp('volume', S.sdvxVolume || 91, '50px'), h('span', { class: 'muted' }, 'music_db volume (game default 91)')),
+		row('Laser right edge', sel('edge', [['124', '124 (same as your 2811 files)'], ['127', '127 (full VOX range)']], String(S.sdvxEdge || 124))),
+		row('Jacket image', jacket),
+		row('Song audio', h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, audioChk, hasAudio ? 'make .2dx from ' + ed.audio.fileName : 'load the song first to make .2dx files')),
+		row('Preview', h('span', { class: 'muted' }, 'from ' + ((parseInt(m.po, 10) || 0) / 1000).toFixed(1) + ' s for ' + (((parseInt(m.plength, 10) || 15000)) / 1000).toFixed(1) + ' s (po / plength in the Chart tab)')),
+		h('div', { class: 'note' }, 'The chart offset (o = ' + (m.o || 0) + ' ms) is applied to the audio so measure 1 starts at 0:00, since SDVX has no offset setting.'));
+	const status = h('div', { class: 'note' });
+	const go = async () => {
+		const id = parseInt(f.id.value, 10), ascii = f.ascii.value.trim();
+		if (!(id > 0 && id < 10000)) return toast('Song ID must be 1–9999', true);
+		if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(ascii)) return toast('ASCII name: letters, digits, _ and - only', true);
+		const lv = parseFloat(f.level.value) || 1;
+		Object.assign(S, { sdvxId: id, sdvxAscii: ascii, sdvxInf: +f.inf.value, sdvxVersion: +f.version.value, sdvxVolume: parseInt(f.volume.value, 10) || 91, sdvxEdge: +f.edge.value, sdvxLevelX10: x10.checked });
+		ed.saveSettings();
+		btn.disabled = true;
+		try {
+			const r = await SDVX.buildPackage(ed.chart, {
+				id, ascii, slot: f.slot.value, infVer: f.slot.value === 'infinite' ? +f.inf.value : (f.slot.value === 'maximum' ? 0 : 0),
+				difnum: Math.round(x10.checked ? lv * 10 : lv), version: +f.version.value, volume: K.clamp(parseInt(f.volume.value, 10) || 91, 0, 127),
+				laserEdge: +f.edge.value, title: f.title.value, artist: f.artist.value, titleYomi: f.titleYomi.value, artistYomi: f.artistYomi.value,
+				illustrator: f.illustrator.value, effector: f.effector.value, bpmMin: parseFloat(f.bpmMin.value) || bpms[0], bpmMax: parseFloat(f.bpmMax.value) || bpms[0],
+				jacket: jacket.files[0] || null, audioBytes: audioChk.checked ? ed.audio.srcBytes : null,
+				offsetMs: parseInt(m.o, 10) || 0, previewMs: (parseInt(m.po, 10) || 0), previewLen: parseInt(m.plength, 10) || 15000,
+			}, (msg) => { status.textContent = msg; });
+			const name = String(id).padStart(4, '0') + '_' + ascii + '_sdvx.zip';
+			const a = h('a', { href: URL.createObjectURL(r.blob), download: name }); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+			showWarnings('SOUND VOLTEX export', 'Saved ' + name + ' (' + r.files.length + ' files). Copy the folder inside it to your data_mods folder.', r.warnings, 'Everything converted.');
+		} catch (e) { console.error(e); toast('Export failed: ' + (e.message || e), true); btn.disabled = false; }
+	};
+	const btn = h('button', { class: 'on', onclick: go }, 'Export .zip');
+	showModal('Export for SOUND VOLTEX', h('div', null, body, status, h('div', { class: 'btns' }, btn, h('button', { onclick: closeModal }, 'Cancel'))));
 }
 function viewKsh() {
 	const { text } = K.exportKsh(ed.chart);
@@ -757,7 +945,7 @@ window.addEventListener('keydown', (e) => {
 		else if (lk === 'c') { e.preventDefault(); ed.copy(); }
 		else if (lk === 'x') { e.preventDefault(); ed.copy(true); }
 		else if (lk === 'v') { e.preventDefault(); ed.paste(e.shiftKey); }
-		else if (lk === 'a') { e.preventDefault(); ed.selectAll(); }
+		else if (lk === 'a') { e.preventDefault(); ed.selectAll(e.shiftKey); }
 		else if (lk === 'm') { e.preventDefault(); ed.mirrorSelection(); }
 		else if (lk === 'n') { e.preventDefault(); newChart(); }
 		else if (k === 'ArrowUp') { e.preventDefault(); changeDiv(1); }
@@ -826,7 +1014,7 @@ function frame() {
 		const t0 = performance.now();
 		ed.needDraw = false;
 		tl.draw();
-		if (ed.settings.showPreview) { pv.draw(ed.playing ? ed.playTick : ed.cursor); previewFrames = 30; }
+		if (ed.settings.showPreview) { pv.draw(ed.playing ? ed.playTick : ed.cursor, ed.playing); previewFrames = 30; }
 		updateTransport();
 		const dt = performance.now() - t0; perf.frames++; perf.sum += dt; perf.worst = Math.max(perf.worst, dt);
 	} else if (previewFrames > 0 && ed.settings.showPreview) { previewFrames--; pv.draw(ed.cursor); }
@@ -835,7 +1023,7 @@ function frame() {
 setInterval(() => ed.scheduleHits(), 20);
 
 // ---------------------------------------------------------------- boot
-buildMenus(); buildToolbox(); buildOptbar(); buildTransport(); buildTabs();
+buildMenus(); buildToolbox(); buildOptbar(); buildTransport(); buildTabs(); syncSpeedUI();
 $('#previewPane').classList.toggle('hidden', !ed.settings.showPreview);
 (() => {
 	const a = readAutosave();

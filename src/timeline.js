@@ -42,7 +42,7 @@ class TimelineView {
 		this.laneW = S.laneW;
 		this.trackL = this.waveR + 10;
 		this.trackR = this.trackL + this.laneW * 6;
-		this.timingL = this.trackR + 10; this.timingR = this.timingL + 84;
+		this.timingL = this.trackR + 10; this.timingR = this.timingL + 104;
 		const vis = ALL_COLS.filter(k => S.cols[k]);
 		const avail = this.w - this.timingR - 6;
 		const cw = vis.length ? Math.max(46, Math.min(84, Math.floor(avail / vis.length))) : 0;
@@ -370,27 +370,33 @@ class TimelineView {
 		const x0 = this.timingL, x1 = this.timingR;
 		c.save(); c.beginPath(); c.rect(x0, this.HEAD, x1 - x0, this.h); c.clip();
 		c.textBaseline = 'bottom';
+		this.timingHits = []; // clickable label boxes (editor hit testing / box select uses these)
 		const stack = new Map(); // small labels at the same tick stack upwards
-		const label = (t, txt, color, row) => {
+		const label = (t, txt, color, row, hit) => {
 			if (t < t0 - 200 || t > t1 + 200) return;
 			const y = Math.round(this.yOf(t)) + 0.5;
-			c.strokeStyle = color; c.beginPath(); c.moveTo(x0, y); c.lineTo(x1, y); c.stroke();
-			c.fillStyle = color; c.font = (row === 0 ? '600 11px ' : '10px ') + font;
+			const on = hit && ed.sel.has(hit.item.id), hov = hit && ed.hover && ed.hover.item === hit.item;
+			const col = on ? '#7fe4ff' : color;
+			c.strokeStyle = col; c.globalAlpha = row === 3 && !on ? 0.6 : 1; c.beginPath(); c.moveTo(x0, y); c.lineTo(x1, y); c.stroke(); c.globalAlpha = 1;
+			c.font = (row === 0 ? '600 11px ' : '10px ') + font;
 			let dy = 0;
 			if (row === 3) { const n = stack.get(t) || 0; stack.set(t, n + 1); dy = 11 + n * 11; }
-			c.fillText(txt, x0 + 3 + (row === 2 ? 44 : 0), y - 1 - dy);
+			const tx = x0 + 3 + (row === 2 ? 52 : 0), ty = y - 1 - dy, w = c.measureText(txt).width;
+			if (on || hov) { c.fillStyle = on ? 'rgba(127,228,255,0.18)' : 'rgba(255,255,255,0.08)'; c.fillRect(tx - 2, ty - 11, Math.min(w + 4, x1 - tx + 2), 12); }
+			c.fillStyle = col; c.fillText(txt, tx, ty);
+			if (hit) this.timingHits.push({ x0: tx - 2, x1: Math.min(x1, tx + w + 2), y0: ty - 12, y1: ty + 2, t, ...hit });
 		};
 		for (const s of ch.stops) {
 			if (s.t + s.l < t0 || s.t > t1) continue;
 			const ya = this.yOf(s.t), yb = this.yOf(s.t + s.l);
 			c.fillStyle = ed.sel.has(s.id) ? 'rgba(127,228,255,.35)' : 'rgba(255,90,90,0.25)'; c.fillRect(x1 - 10, yb, 7, ya - yb);
-			label(s.t, 'stop ' + fmtLen(s.l), '#ff7a7a', 2);
+			label(s.t, 'stop ' + fmtLen(s.l), '#ff7a7a', 2, { kind: 'stop', item: s });
 		}
-		for (const s of ch.sig) label(ed.timing.measureStart(s.m), s.n + '/' + s.d, '#e6c84a', 2);
-		for (const b of ch.bpm) label(b.t, '♩' + K.fmtNum(b.v), ed.sel.has(b.id) ? '#7fe4ff' : '#8fe07a', 0);
-		const small = (arr, pre) => { for (const e of arr) label(e.t, pre + e.v, '#8a8a96', 3); };
-		small(ch.filterType, 'filter '); small(ch.slamVol, 'slamvol '); small(ch.pfilterGain, 'pfgain ');
-		for (const r of ch.raw) label(r.t, r.k === '//' ? '// ' + r.v : (r.k || '') + (r.k ? '=' : '') + r.v, '#6f6f7a', 3);
+		for (const s of ch.sig) label(ed.timing.measureStart(s.m), s.n + '/' + s.d, '#e6c84a', 2, { kind: 'sig', item: s });
+		for (const b of ch.bpm) label(b.t, '♩' + K.fmtNum(b.v), '#8fe07a', 0, { kind: 'bpm', item: b });
+		const small = (key, pre, color) => { for (const e of ch[key]) label(e.t, pre + e.v, color, 3, { kind: 'ev', key, item: e }); };
+		small('filterType', 'filter ', '#c9a2ff'); small('pfilterGain', 'pfgain ', '#a2b8ff'); small('slamVol', 'slamvol ', '#ffb27a'); small('slamSE', 'slam se ', '#ffb27a');
+		for (const r of ch.raw) label(r.t, r.k === '//' ? '// ' + r.v : (r.k || '') + (r.k ? '=' : '') + r.v, '#8a8a96', 3, { kind: 'ev', key: 'raw', item: r });
 		c.restore();
 	}
 
@@ -401,6 +407,17 @@ class TimelineView {
 		c.save(); c.beginPath(); c.rect(col.l, this.HEAD, col.r - col.l, this.h); c.clip();
 		const def = key === 'scroll_speed' ? 1 : 0;
 		const val = (v) => typeof v === 'number' ? v : null;
+		// dashed ghost: the tilt the game engine actually applies (auto laser tilt + manual), from the preview's USC model
+		if (key === 'tilt' && ed.preview && ed.settings.showTiltGhost !== false) {
+			c.save(); c.setLineDash([4, 3]); c.strokeStyle = 'rgba(255,210,140,0.55)'; c.lineWidth = 1.2; c.beginPath();
+			let first = true;
+			for (let y = this.h; y >= this.HEAD - 4; y -= 3) {
+				const t = this.tickAt(y); if (t < -240) continue;
+				const x = this.colX(col, ed.preview.tiltAtTick(t));
+				if (first) { c.moveTo(x, y); first = false; } else c.lineTo(x, y);
+			}
+			c.stroke(); c.restore();
+		}
 		// graph line
 		c.strokeStyle = info.color; c.lineWidth = 1.5; c.beginPath();
 		const yTop = this.HEAD - 5, yBot = this.h + 5;
