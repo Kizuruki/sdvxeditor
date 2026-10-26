@@ -90,8 +90,9 @@ class Preview3D {
 			const last = s.pts.length - 1;
 			s.pts.forEach((p, i) => {
 				if (p.v === p.vf) return;
-				// USC uses raw 0..1 positions for roll / shake (also for wide lasers)
-				ev.push({ sec: this.secAt(s.t + p.ry), o: 1, kind: 'slam', lane: li, size: (p.vf - p.v) / 50, tail: p.vf / 50, end: i === last });
+				// positions as USC stores them (wide lasers in the extended -0.5..1.5 range)
+				const a = K.laserPos(p.v, s.wide), b = K.laserPos(p.vf, s.wide);
+				ev.push({ sec: this.secAt(s.t + p.ry), o: 1, kind: 'slam', lane: li, size: b - a, tail: b, end: i === last });
 			});
 			const lp = s.pts[last];
 			if (lp.v === lp.vf && last > 0) ev.push({ sec: this.secAt(s.t + lp.ry), o: 2, kind: 'exit', lane: li });
@@ -119,10 +120,10 @@ class Preview3D {
 		const out = (raw) => lane === 0 ? -raw : 1 - raw;
 		if (i >= 0) {
 			const s = arr[i], lp = s.pts[s.pts.length - 1];
-			if (tick < s.t + lp.ry) { const v = K.laserValueAt(s, Math.floor(tick)); if (v !== null) return out(v / 50); }
+			if (tick < s.t + lp.ry) { const v = K.laserValueAt(s, Math.floor(tick)); if (v !== null) return out(K.laserPos(v, s.wide)); }
 		}
 		const nx = arr[i + 1];
-		if (nx && nx.t - tick <= 480) return out(nx.pts[0].v / 50);
+		if (nx && nx.t - tick <= 480) return out(K.laserPos(nx.pts[0].v, nx.wide));
 		return 0;
 	}
 	_freshSim(sec) {

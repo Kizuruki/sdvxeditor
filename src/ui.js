@@ -563,7 +563,11 @@ function renderSettings(body) {
 		row('Music volume', ...slider('volMusic', 0, 1, 0.01, pct)),
 		row('Hitsound volume', ...slider('volHit', 0, 1, 0.01, pct)),
 		row('Metronome volume', ...slider('volMetro', 0, 1, 0.01, pct)),
+		row('Game sounds volume', ...slider('volGame', 0, 1, 0.01, pct)),
 		row('Hitsounds', chk('hitsounds', () => TR.hits.classList.toggle('on', S.hitsounds))),
+		row('Slam & FX chip sounds', chk('gameSounds')),
+		row('Play FX effects', chk('playFx')),
+		h('div', { class: 'note' }, 'Hitsounds are editor ticks for every note. Slam & FX chip sounds are the sounds the game plays (chokkakuse / chokkakuvol, fx-l_se / fx-r_se). "Play FX effects" applies FX hold effects and the laser filter to the music the way USC does, so you hear Retrigger, Gate, Flanger, peak/LPF/HPF/bitcrush etc. while editing.'),
 		row('Click when placing', chk('placeSound')),
 		row('Visual latency', ...slider('latencyMs', -150, 150, 1, v => v + ' ms')),
 		h('div', { class: 'note' }, 'Playback timing comes from the audio clock and already corrects for your output device. Only adjust latency if the cursor still looks early (+) or late (−) against what you hear, e.g. with Bluetooth headphones.')));

@@ -17,7 +17,7 @@ const CAM_STEP = { zoom_top: 5, zoom_bottom: 5, zoom_side: 5, center_split: 5, r
 const DEFAULT_SETTINGS = {
 	laneW: 42, showWave: true, showPreview: true, rate: 1, follow: true,
 	speedMode: 'mod', modSpeed: 800, hiSpeed: 5, drawOffsetMs: 0, previewW: 340,
-	volMusic: 0.8, volHit: 0.55, volMetro: 0, hitsounds: true, latencyMs: 0, autosave: true, placeSound: false,
+	volMusic: 0.8, volHit: 0.55, volGame: 0.7, volMetro: 0, hitsounds: true, gameSounds: true, playFx: true, latencyMs: 0, autosave: true, placeSound: false,
 	cols: { zoom_top: true, zoom_bottom: true, zoom_side: true, tilt: true, rotation_deg: true, center_split: false, scroll_speed: false },
 };
 
@@ -47,7 +47,8 @@ class Editor {
 	saveSettings() { saveJSON('ksmed.settings', this.settings); }
 	applyAudioSettings() {
 		const s = this.settings;
-		this.audio.vol = { music: s.volMusic, hit: s.hitsounds ? s.volHit : 0, metro: s.volMetro };
+		this.audio.vol = { music: s.volMusic, hit: s.volHit, game: s.volGame ?? 0.7, metro: s.volMetro };
+		this.audio.setFxEnabled(s.playFx !== false);
 		this.audio.userLatency = (s.latencyMs || 0) / 1000;
 		this.audio.applyVolumes();
 	}
@@ -944,10 +945,18 @@ class Editor {
 		const t = this.cursor;
 		this.playStartTick = t;
 		const s = this.songTimeOf(t);
+		this.syncFx(true);
 		this.audio.play(s, this.settings.rate);
 		this.playing = true; this.playTick = t;
 		this.buildHits(s);
 		this.emit('play');
+	}
+	// compile FX hold / laser filter effects for the audio worklet
+	syncFx(force) {
+		if (!this.audio.ctx) return;
+		if (!force && this.fxVer === this.version) return;
+		this.fxVer = this.version;
+		try { this.audio.setSchedule(KSMFX.buildSchedule(this)); } catch (e) { console.warn('fx schedule', e); }
 	}
 	pause() { // stop and leave the cursor where playback is
 		if (!this.playing) return;
@@ -965,10 +974,22 @@ class Editor {
 	seekTo(t) { const was = this.playing; if (was) { this.audio.stop(); this.playing = false; } this.cursor = Math.max(0, t); if (was) this.play(); this.requestDraw(); }
 	buildHits(fromSong) {
 		const c = this.chart, ev = [];
-		const add = (t, k) => ev.push({ s: this.songTimeOf(t), k });
+		// game: sounds the game itself plays (slams, FX chip key sounds); hit: editor tick sounds
+		const add = (t, k, g, game) => ev.push({ s: this.songTimeOf(t), k, g: g === undefined ? 1 : g, game: !!game });
 		c.bt.forEach(l => l.forEach(n => add(n.t, 'bt')));
-		c.fx.forEach(l => l.forEach(n => add(n.t, 'fx')));
-		c.laser.forEach(l => l.forEach(s => s.pts.forEach(p => { if (p.v !== p.vf) add(s.t + p.ry, 'slam'); })));
+		c.fx.forEach(l => l.forEach(n => {
+			if (n.l === 0 && n.se) { const [name, vol] = n.se.split(';'); add(n.t, 'se_' + name, K.clamp((parseFloat(vol) || 100) / 100, 0, 1), true); }
+			else add(n.t, 'fx');
+		}));
+		const defVol = parseFloat(c.meta.chokkakuvol); const sv0 = Number.isFinite(defVol) ? defVol : 50;
+		const seAt = new Map(c.slamSE.map(e => [e.t, e.v]));
+		c.laser.forEach(l => l.forEach(s => s.pts.forEach(p => {
+			if (p.v === p.vf) return;
+			const t = s.t + p.ry, se = seAt.get(t) || 'normal';
+			if (se === 'mute') return;
+			const vp = K.lastAtOrBefore(c.slamVol, t), vol = vp ? parseFloat(vp.v) : sv0;
+			add(t, 'slam_' + se, K.clamp((Number.isFinite(vol) ? vol : 50) / 50, 0, 2), true);
+		})));
 		ev.sort((a, b) => a.s - b.s);
 		this.hits = ev;
 		let i = 0; while (i < ev.length && ev[i].s < fromSong - 0.001) i++;
@@ -982,12 +1003,13 @@ class Editor {
 		const nowCtxSong = a.t0Song + (a.ctx.currentTime - a.t0Ctx) * a.rate;
 		if (this.hitsDirty) this.buildHits(nowCtxSong);
 		const horizon = nowCtxSong + 0.15 * a.rate;
-		if (this.settings.hitsounds) {
-			while (this.hitPtr < this.hits.length && this.hits[this.hitPtr].s <= horizon) {
-				const h = this.hits[this.hitPtr++];
-				if (h.s >= nowCtxSong - 0.01) a.schedule(h.k, h.s);
-			}
-		} else this.hitPtr = this.hits.length;
+		const S = this.settings;
+		while (this.hitPtr < this.hits.length && this.hits[this.hitPtr].s <= horizon) {
+			const h = this.hits[this.hitPtr++];
+			if (h.s < nowCtxSong - 0.01) continue;
+			if (h.game ? S.gameSounds !== false : S.hitsounds) a.schedule(h.k, h.s, h.g, h.game ? 'game' : 'hit');
+		}
+		if (this.playing && this.fxVer !== this.version && !this.drag) this.syncFx();
 		if (this.settings.volMetro > 0) {
 			if (this.nextBeat === null) { const t = this.tickOfSong(nowCtxSong); const ms = this.timing.measureOf(Math.max(0, t)); const bl = 960 / ms.d; this.nextBeat = ms.start + Math.ceil((t - ms.start) / bl - 1e-6) * bl; }
 			for (let k = 0; k < 16; k++) {

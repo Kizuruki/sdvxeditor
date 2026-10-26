@@ -12,7 +12,7 @@ class AudioEngine {
 		this.buffer = null; this.fileName = '';
 		this.src = null; this.playing = false;
 		this.rate = 1;
-		this.vol = { music: 0.8, hit: 0.55, metro: 0.0 };
+		this.vol = { music: 0.8, hit: 0.55, game: 0.7, metro: 0.0 };
 		this.peaks = null;               // waveform mip levels [{bucket(s), data: Float32Array}]
 		this.scheduled = [];
 		this.t0Ctx = 0; this.t0Song = 0;
@@ -25,9 +25,11 @@ class AudioEngine {
 			this.ctx = new AC({ latencyHint: 'interactive' });
 			this.musicGain = this.ctx.createGain(); this.musicGain.connect(this.ctx.destination);
 			this.hitGain = this.ctx.createGain(); this.hitGain.connect(this.ctx.destination);
+			this.gameGain = this.ctx.createGain(); this.gameGain.connect(this.ctx.destination);
 			this.metroGain = this.ctx.createGain(); this.metroGain.connect(this.ctx.destination);
 			this.applyVolumes();
 			this.sounds = this._makeSounds();
+			this._initWorklet();
 		}
 		if (this.ctx.state === 'suspended') this.ctx.resume();
 		return this.ctx;
@@ -36,15 +38,41 @@ class AudioEngine {
 		if (!this.ctx) return;
 		this.musicGain.gain.value = this.vol.music;
 		this.hitGain.gain.value = this.vol.hit;
+		this.gameGain.gain.value = this.vol.game ?? 0.7;
 		this.metroGain.gain.value = this.vol.metro;
 	}
 	get duration() { return this.buffer ? this.buffer.duration : 0; }
+	// The music runs through an AudioWorklet that also renders FX hold / laser effects (see fx.js).
+	// Falls back to a plain AudioBufferSourceNode if worklets are unavailable.
+	_initWorklet() {
+		const ctx = this.ctx;
+		this.fxNode = null; this.pcmSent = false;
+		if (!ctx.audioWorklet || typeof KSMFX === 'undefined') return;
+		this.workletReady = KSMFX.addWorklet(ctx).then(() => {
+			this.fxNode = new AudioWorkletNode(ctx, 'ksm-fx', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
+			this.fxNode.connect(this.musicGain);
+			this.fxNode.port.postMessage({ cmd: 'fx', on: this.fxEnabled !== false });
+			if (this.buffer) this._sendPcm();
+			if (this.pendingSched) this.fxNode.port.postMessage({ cmd: 'sched', sched: this.pendingSched });
+		}).catch((e) => { console.warn('FX worklet unavailable, effects disabled', e); this.fxNode = null; });
+	}
+	_sendPcm() {
+		const b = this.buffer; if (!this.fxNode || !b) return;
+		const l = b.getChannelData(0).slice(), r = (b.numberOfChannels > 1 ? b.getChannelData(1) : b.getChannelData(0)).slice();
+		this.fxNode.port.postMessage({ cmd: 'pcm', pcm: { l, r, n: b.length, sr: b.sampleRate } }, [l.buffer, r.buffer]);
+		this.pcmSent = true;
+	}
+	get fxReady() { return !!(this.fxNode && this.pcmSent); }
+	setSchedule(sched) { this.pendingSched = sched; if (this.fxNode) this.fxNode.port.postMessage({ cmd: 'sched', sched }); }
+	setFxEnabled(on) { this.fxEnabled = on; if (this.fxNode) this.fxNode.port.postMessage({ cmd: 'fx', on }); }
 
 	async load(arrayBuffer, name) {
 		const ctx = this.ensure();
 		const buf = await ctx.decodeAudioData(arrayBuffer.slice(0));
 		this.buffer = buf; this.fileName = name || '';
+		this.pcmSent = false;
 		this._buildPeaks();
+		if (this.fxNode) this._sendPcm();
 		return buf;
 	}
 
@@ -87,7 +115,10 @@ class AudioEngine {
 		const when = ctx.currentTime + 0.05;
 		this.t0Ctx = when; this.t0Song = songTime;
 		this.offEMA = null; this.lastSong = -Infinity;
-		if (this.buffer && songTime < this.buffer.duration) {
+		if (this.buffer && songTime < this.buffer.duration && this.fxReady) {
+			this.fxNode.port.postMessage({ cmd: 'play', frame: Math.round(when * ctx.sampleRate), song: songTime, rate: this.rate });
+			this.workletPlaying = true;
+		} else if (this.buffer && songTime < this.buffer.duration) {
 			const src = ctx.createBufferSource();
 			src.buffer = this.buffer;
 			src.playbackRate.value = this.rate;
@@ -100,6 +131,7 @@ class AudioEngine {
 	}
 	stop() {
 		if (this.src) { try { this.src.stop(); } catch (e) { } this.src.disconnect(); this.src = null; }
+		if (this.workletPlaying && this.fxNode) { this.fxNode.port.postMessage({ cmd: 'stop' }); this.workletPlaying = false; }
 		for (const s of this.scheduled) { try { s.stop(); } catch (e) { } }
 		this.scheduled = [];
 		this.playing = false;
@@ -128,15 +160,15 @@ class AudioEngine {
 	}
 	// Context time at which a given song time will be heard
 	ctxTimeFor(songTime) { return this.t0Ctx + (songTime - this.t0Song) / this.rate; }
-	schedule(kind, songTime, gain) {
+	schedule(kind, songTime, gain, bus) {
 		const ctx = this.ctx; if (!ctx || !this.playing) return;
 		const when = this.ctxTimeFor(songTime);
 		if (when < ctx.currentTime - 0.002) return;
 		const s = ctx.createBufferSource();
-		s.buffer = this.sounds[kind];
+		s.buffer = this.sounds[kind] || this.sounds[kind.startsWith('slam') ? 'slam_normal' : 'fx'];
 		let node = s;
 		if (gain !== undefined && gain !== 1) { const g = ctx.createGain(); g.gain.value = gain; s.connect(g); node = g; }
-		node.connect(kind === 'metro' || kind === 'metroHi' ? this.metroGain : this.hitGain);
+		node.connect(kind === 'metro' || kind === 'metroHi' ? this.metroGain : bus === 'game' ? this.gameGain : this.hitGain);
 		s.start(Math.max(when, ctx.currentTime));
 		s.onended = () => { const i = this.scheduled.indexOf(s); if (i >= 0) this.scheduled.splice(i, 1); };
 		this.scheduled.push(s);
@@ -161,8 +193,17 @@ class AudioEngine {
 			bt: mk(0.06, (t, r) => { const e = Math.exp(-t * 70); return (r() * 0.55 + Math.sin(2 * Math.PI * 2400 * t) * 0.45) * e * 0.9; }),
 			// lower, fuller clap for FX
 			fx: mk(0.09, (t, r) => { const e = Math.exp(-t * 45); return (r() * 0.6 + Math.sin(2 * Math.PI * 900 * t) * 0.5) * e * 0.9; }),
-			// swoosh for laser slams
-			slam: mk(0.16, (t, r) => { const e = Math.exp(-t * 22) * Math.min(1, t * 400); return r() * e * 0.8 + Math.sin(2 * Math.PI * (500 - t * 1800) * t) * e * 0.4; }),
+			// laser slams (chokkakuse: normal / up / down / swing)
+			slam_normal: mk(0.16, (t, r) => { const e = Math.exp(-t * 22) * Math.min(1, t * 400); return r() * e * 0.8 + Math.sin(2 * Math.PI * (500 - t * 1800) * t) * e * 0.4; }),
+			slam_up: mk(0.18, (t, r) => { const e = Math.exp(-t * 18) * Math.min(1, t * 400); return r() * e * 0.45 + Math.sin(2 * Math.PI * (300 + t * 2600) * t) * e * 0.6; }),
+			slam_down: mk(0.2, (t, r) => { const e = Math.exp(-t * 16) * Math.min(1, t * 400); return r() * e * 0.45 + Math.sin(2 * Math.PI * (900 - t * 2200) * t) * e * 0.6; }),
+			slam_swing: mk(0.3, (t, r) => { const e = Math.sin(Math.PI * Math.min(1, t / 0.3)) * Math.exp(-t * 6); return r() * e * 0.7; }),
+			// FX chip key sounds (fx-l_se / fx-r_se)
+			se_clap: mk(0.22, (t, r) => { const b = (k) => Math.max(0, 1 - Math.abs(t - k) * 200); const e = Math.exp(-t * 18) + b(0.008) + b(0.016); return r() * Math.min(1.2, e) * 0.7; }),
+			se_clap_punchy: mk(0.18, (t, r) => { const e = Math.exp(-t * 28); return r() * e * 0.8 + Math.sin(2 * Math.PI * 180 * t) * Math.exp(-t * 40) * 0.5; }),
+			se_clap_impact: mk(0.3, (t, r) => { const e = Math.exp(-t * 12); return r() * e * 0.75 + Math.sin(2 * Math.PI * (120 - t * 100) * t) * Math.exp(-t * 15) * 0.7; }),
+			se_snare: mk(0.25, (t, r) => { const e = Math.exp(-t * 16); return r() * e * 0.6 + Math.sin(2 * Math.PI * 220 * t) * Math.exp(-t * 30) * 0.5; }),
+			se_snare_lo: mk(0.28, (t, r) => { const e = Math.exp(-t * 13); return r() * e * 0.5 + Math.sin(2 * Math.PI * 150 * t) * Math.exp(-t * 25) * 0.6; }),
 			metro: mk(0.04, (t) => Math.sin(2 * Math.PI * 1500 * t) * Math.exp(-t * 90) * 0.8),
 			metroHi: mk(0.05, (t) => Math.sin(2 * Math.PI * 2300 * t) * Math.exp(-t * 80) * 0.9),
 		};
