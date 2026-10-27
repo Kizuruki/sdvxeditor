@@ -132,7 +132,9 @@ kbd { font: 10.5px var(--mono); background: #2a2a2f; border: 1px solid #3c3c44; 
 #modalBody table { border-collapse: collapse; width: 100%; }
 #modalBody td { padding: 3px 6px; border-bottom: 1px solid #2a2a2e; vertical-align: top; }
 #modalBody td:first-child { white-space: nowrap; color: var(--muted); width: 1%; }
-#modalBody h3 { margin: 12px 0 6px; font-size: 13px; color: var(--accent); }
+#modalBody h3 { margin: 12px 0 6px; font-size: 13px; color: var(--accent); scroll-margin-top: 4px; }
+#modalBody pre { background: #141417; border: 1px solid #2a2a2e; border-radius: 4px; padding: 6px 8px; overflow-x: auto; font-size: 11.5px; }
+#modalBody a { color: var(--accent); }
 .toast { position: fixed; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 95; background: #26262c; border: 1px solid var(--line2); border-left: 3px solid var(--accent); padding: 7px 14px; border-radius: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.5); max-width: 70vw; }
 .toast.err { border-left-color: var(--danger); }
 .banner { background: #1d3340; border: 1px solid var(--accent2); border-radius: 4px; padding: 8px; margin-bottom: 10px; }
@@ -2421,6 +2423,8 @@ class TimelineView {
 		}
 	}
 
+	slamH() { return Math.max(10, Math.min(28, 60 * this.ppt)); } // drawn height of a slam (also its click area)
+
 	laserPath(sec, lane, cb) { // calls cb(kind, ...) for every drawable piece of a section
 		const pts = sec.pts;
 		for (let i = 0; i < pts.length; i++) {
@@ -2442,14 +2446,15 @@ class TimelineView {
 			for (let i = i0 - 1; i >= 0; i--) {
 				const sec = arr[i];
 				if (K.sectionEndTick(sec) < t0) { if (sec.t + 960 * 32 < t0) break; continue; }
-				const slamH = Math.max(5, Math.min(14, 30 * this.ppt));
+				const slamH = this.slamH();
 				c.fillStyle = fill;
 				// body
 				this.laserPath(sec, lane, (kind, a, b, cc, d, p) => {
 					if (kind === 'slam') {
 						const y = this.yOf(a), x0 = this.laserX(b), x1 = this.laserX(cc);
-						c.fillRect(Math.min(x0, x1) - hw, y - slamH, Math.abs(x1 - x0) + hw * 2, slamH);
-						c.fillStyle = edge; c.fillRect(Math.min(x0, x1) - hw, y - slamH, Math.abs(x1 - x0) + hw * 2, 2); c.fillStyle = fill;
+						const sx = Math.min(x0, x1) - hw, sw = Math.abs(x1 - x0) + hw * 2;
+						c.fillRect(sx, y - slamH, sw, slamH); c.fillRect(sx, y - slamH, sw, slamH); // double fill: slams read stronger than the trail
+						c.fillStyle = edge; c.fillRect(sx, y - slamH, sw, 2); c.fillRect(sx, y - 1, sw, 1); c.fillStyle = fill;
 					} else {
 						const ya = this.yOf(a), yb = this.yOf(cc);
 						if (ya < -50 && yb < -50) return; if (ya > this.h + 50 && yb > this.h + 50) return;
@@ -2498,6 +2503,7 @@ class TimelineView {
 	_drawSpins(t0, t1) {
 		const c = this.ctx, ed = this.ed;
 		const font = UI_FONT;
+		this.spinHits = []; // label boxes, clickable with any tool
 		for (const s of ed.chart.spins) {
 			if (s.t + s.l < t0 || s.t > t1) continue;
 			const y0 = this.yOf(s.t), y1 = this.yOf(s.t + s.l);
@@ -2507,6 +2513,7 @@ class TimelineView {
 			c.font = '600 10px ' + font; c.textBaseline = 'middle';
 			const w = c.measureText(lab).width + 8;
 			c.fillStyle = ed.sel.has(s.id) ? '#7fe4ff' : '#9b5cf0'; c.fillRect(x - w + 3, y0 - 8, w, 14);
+			this.spinHits.push({ x0: x - w + 3, x1: x + 3, y0: y0 - 8, y1: y0 + 6, item: s });
 			c.fillStyle = '#fff'; c.fillText(lab, x - w + 7, y0 - 1);
 		}
 	}
@@ -3253,6 +3260,13 @@ const SDVX = (() => {
 		const filterAt = (t) => { const p = K.lastAtOrBefore(c.filterType, t); return KSMFX.tabCode(KSMFX.filterKind(p ? p.v : c.meta.filtertype, defines)); };
 		const spinAt = new Map(c.spins.map(s => [s.t, s]));
 		const usedSpins = new Set();
+		// SDVX has no spin direction: the game turns with the slam the roll sits on (the importer reads it back the same
+		// way: spin dir = -slam dir). When several slams share the spin's tick, use one that goes the right way.
+		const spinSlam = new Map();
+		for (const pass of [true, false]) for (const lane of c.laser) for (const sec of lane) for (const p of sec.pts) {
+			const sp = spinAt.get(sec.t + p.ry); if (!sp || spinSlam.has(sp) || p.v === p.vf) continue;
+			if (!pass || Math.sign(p.vf - p.v) === -sp.dir) spinSlam.set(sp, p);
+		}
 		// SDVX spin durations include the overshoot, so they are twice the KSH length
 		const rollCode = (s) => {
 			const beats = 2 * s.l / 240;
@@ -3272,7 +3286,7 @@ const SDVX = (() => {
 					const t = s.t + p.ry, fc = filterAt(t);
 					if (p.v !== p.vf) {
 						const sp = spinAt.get(t); let roll = [0, 0];
-						if (sp) { roll = rollCode(sp); usedSpins.add(sp); }
+						if (sp && spinSlam.get(sp) === p) { roll = rollCode(sp); usedSpins.add(sp); }
 						rows.push(row(t, p.v, i === 0 ? 1 : 0, roll, fc));
 						rows.push(row(t, p.vf, i === last ? 2 : 0, [0, 0], fc));
 					} else rows.push(row(t, p.v, i === 0 ? 1 : i === last ? 2 : 0, [0, 0], fc));
@@ -3346,7 +3360,7 @@ const SDVX = (() => {
 		let def = 'type=' + type;
 		if (/Retrigger|Gate|Wobble|Echo/.test(type) && a) def += ';waveLength=1/' + a;
 		if (type === 'Echo' && b) def += ';feedbackLevel=' + b + '%';
-		if (type === 'BitCrusher' && a) def += ';amount=' + a + 'samples';
+		if (type === 'BitCrusher' && a) def += ';reduction=' + a + 'samples;amount=' + a + 'samples'; // KSM reads reduction, USC reads amount
 		if (type === 'PitchShift' && a) def += ';pitch=' + a;
 		if (type === 'TapeStop' && a) def += ';speed=' + a + '%';
 		return def;
@@ -3463,7 +3477,7 @@ const SDVX = (() => {
 				if (roll) {
 					const nx = lr[i + 1], dir = nx && tick(nx[0]) === t ? Math.sign((+nx[1]) * scale - v) || 1 : 1;
 					const len = +lenCol || 0, beats = roll >= 6 ? (len ? len / 10 : DEF_ROLL[roll]) : (len || DEF_ROLL[roll]);
-					c.spins.push({ id: id(), t, kind: roll === 5 || roll === 7 ? 'half' : 'spin', dir: -dir, l: Math.max(60, Math.round(beats / 2 * 240)), amp: 250, rep: 3, dec: 2 });
+					if (!c.spins.some(x => x.t === t)) c.spins.push({ id: id(), t, kind: roll === 5 || roll === 7 ? 'half' : 'spin', dir: -dir, l: Math.max(60, Math.round(beats / 2 * 240)), amp: 250, rep: 3, dec: 2 });
 				}
 				if (node === 2) finish();
 			}
@@ -4116,7 +4130,7 @@ class Editor {
 			const s = arr[i];
 			for (let k = 0; k < s.pts.length; k++) {
 				const p = s.pts[k], q = s.pts[k + 1], tp = s.t + p.ry;
-				if (p.v !== p.vf) { const yy = tv.yOf(tp), x0 = tv.laserX(Math.min(p.v, p.vf)) - L * 0.3, x1 = tv.laserX(Math.max(p.v, p.vf)) + L * 0.3; if (y <= yy + 2 && y >= yy - 12 && x >= x0 && x <= x1) return { kind: 'lslam', lane, sec: s, idx: k, item: p }; }
+				if (p.v !== p.vf) { const yy = tv.yOf(tp), x0 = tv.laserX(Math.min(p.v, p.vf)) - L * 0.3, x1 = tv.laserX(Math.max(p.v, p.vf)) + L * 0.3; if (y <= yy + 2 && y >= yy - tv.slamH() - 2 && x >= x0 && x <= x1) return { kind: 'lslam', lane, sec: s, idx: k, item: p }; }
 				if (!q) continue;
 				const tq = s.t + q.ry;
 				if (t >= tp && t <= tq) {
@@ -4149,9 +4163,10 @@ class Editor {
 		for (const s of c.stops) { if (near(s.t)) return { kind: 'stop', item: s }; }
 		return null;
 	}
-	hitSpin(x, y) {
+	hitSpin(x, y, labelOnly) {
 		const tv = this.tl;
-		if (x < tv.trackR - 80 || x > tv.trackR + 2) return null;
+		for (const r of tv.spinHits || []) if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) return { kind: 'spin', item: r.item };
+		if (labelOnly || x < tv.trackR - 80 || x > tv.trackR + 2) return null;
 		for (const s of this.chart.spins) if (Math.abs(tv.yOf(s.t) - 1 - y) <= 7) return { kind: 'spin', item: s };
 		return null;
 	}
@@ -4205,8 +4220,8 @@ class Editor {
 			return;
 		}
 		if (reg.kind !== 'track') return;
-		const sp = this.tool === 'select' ? this.hitSpin(x, y) : null;
-		if (sp) { this.setSel([sp.item.id], shift || ctrl); return; }
+		const sp = this.hitSpin(x, y, this.tool !== 'select'); // the purple label works with every tool
+		if (sp) { this.setSel([sp.item.id], shift || ctrl); if (dbl) this.editSpinPopover(sp.item, e.clientX, e.clientY); return; }
 		const hit = this.hitTrack(x, y);
 		const tool = this.tool;
 		if (tool === 'select') {
@@ -4716,7 +4731,7 @@ class Editor {
 	// ---------------------------------------------------------------- delete / clipboard / mirror
 	deleteAt(x, y, reg) {
 		let h = null;
-		if (reg.kind === 'track') h = (this.tool === 'select' && this.hitSpin(x, y)) || this.hitTrack(x, y, this.tool === 'laserL' || this.tool === 'laserR' ? this.tool : 'select');
+		if (reg.kind === 'track') h = this.hitSpin(x, y, this.tool !== 'select') || this.hitTrack(x, y, this.tool === 'laserL' || this.tool === 'laserR' ? this.tool : 'select');
 		else if (reg.kind === 'cam') h = this.hitCam(reg.col, x, y);
 		else if (reg.kind === 'timing') h = this.hitTiming(x, y);
 		if (!h) return;
@@ -4880,7 +4895,7 @@ class Editor {
 	setEvent(key, id, patch, label) { this.edit(label || 'Edit event', c => { const o = c[key].find(x => x.id === id); if (o) this.replaceIn(c[key], id, { ...o, ...patch }); }); }
 	editEventPopover(key, item, cx, cy) {
 		const H = EVENT_HELP[key] || {};
-		if (key === 'filterType') popover(cx, cy, H.title, [{ key: 'v', label: 'Effect', type: 'select', value: item.v, options: [...new Set([item.v, 'peak', 'lpf1', 'hpf1', 'bitc'])].map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Laser effect'));
+		if (key === 'filterType') popover(cx, cy, H.title, [{ key: 'v', label: 'Effect', type: 'select', value: item.v, options: [...new Set([item.v, 'peak', 'lpf1', 'hpf1', 'bitc', ...Object.keys(KSMFX.parseDefines(this.chart.defs)).filter(k => k.startsWith('filter:')).map(k => k.slice(7))])].map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Laser effect'));
 		else if (key === 'pfilterGain' || key === 'slamVol') popover(cx, cy, H.title, [{ key: 'v', label: 'Value', type: 'number', value: item.v, hint: H.short }], v => this.setEvent(key, item.id, { v: String(K.clamp(parseInt(v.v, 10) || 0, 0, 100)) }));
 		else if (key === 'slamSE') popover(cx, cy, H.title, [{ key: 'v', label: 'Sound', type: 'select', value: item.v, options: K.SLAM_SOUNDS.map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Slam sound'));
 		else if (key === 'raw') popover(cx, cy, H.title, [{ key: 'k', label: 'Key', type: 'text', value: item.k, hint: '"//" = comment, empty = plain line' }, { key: 'v', label: 'Value', type: 'text', value: item.v }], v => this.setEvent(key, item.id, { k: v.k, v: v.v }, 'Edit line'));
@@ -4912,17 +4927,31 @@ class Editor {
 		if (h.kind === 'ev') { this.editEventPopover(h.key, h.item, cx, cy); return; }
 		if (h.kind === 'bpm') popover(cx, cy, 'BPM change', [{ key: 'v', label: 'BPM', type: 'number', value: K.fmtNum(h.item.v) }], v => { const b = parseFloat(v.v); if (b > 0) this.setBpmAt(h.item.t, b); });
 		else if (h.kind === 'sig') popover(cx, cy, 'Time signature (measure ' + (h.item.m + 1) + ')', [{ key: 'v', label: 'Beats', type: 'text', value: h.item.n + '/' + h.item.d }], v => { const [n, d] = String(v.v).split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) this.setSigAt(h.item.m, n, d); });
+		else if (h.kind === 'spin') this.editSpinPopover(h.item, cx, cy);
 		else if (h.kind === 'stop') popover(cx, cy, 'Stop', [{ key: 'v', label: 'Length', type: 'text', value: fmtLen(h.item.l) }], v => { const l = parseLen(v.v); if (l > 0) this.edit('Edit stop', c => this.replaceIn(c.stops, h.item.id, { ...h.item, l })); });
 	}
 	setBpmAt(t, b) { this.edit('BPM ' + K.fmtNum(b), c => { const ex = K.findAt(c.bpm, t); if (ex) this.replaceIn(c.bpm, ex.id, { ...ex, v: b }); else K.insertSorted(c.bpm, { id: K.nid(), t, v: b }); }); }
 	setSigAt(m, n, d) { this.edit('Time signature ' + n + '/' + d, c => { const ex = c.sig.find(s => s.m === m); if (ex) this.replaceIn(c.sig, ex.id, { ...ex, n, d }); else { c.sig.push({ id: K.nid(), m, n, d }); c.sig.sort((a, b) => a.m - b.m); } }); }
+	// set / replace / remove (code '') the spin on tick t; extra may carry swing settings {amp, rep, dec}
 	setSpinAt(t, code, l, extra = {}) {
-		this.edit('Spin', c => {
+		this.edit(code ? 'Spin' : 'Remove spin', c => {
+			const old = c.spins.find(s => s.t === t);
 			c.spins = c.spins.filter(s => s.t !== t);
 			if (!code) return;
-			const sp = { id: K.nid(), t, kind: code[0] === 'S' ? 'swing' : (code[1] === '(' || code[1] === ')') ? 'spin' : 'half', dir: (code[1] === '(' || code[1] === '<') ? -1 : 1, l, amp: 250, rep: 3, dec: 2, ...extra };
+			const pick = (k, d) => extra[k] ?? (old ? old[k] : undefined) ?? d;
+			const sp = { id: old ? old.id : K.nid(), t, kind: code[0] === 'S' ? 'swing' : (code[1] === '(' || code[1] === ')') ? 'spin' : 'half', dir: (code[1] === '(' || code[1] === '<') ? -1 : 1, l: l > 0 ? l : (old ? old.l : 960), amp: pick('amp', 250), rep: pick('rep', 3), dec: pick('dec', 2) };
 			K.insertSorted(c.spins, sp);
 		});
+	}
+	editSpinPopover(s, cx, cy) {
+		const swing = (v) => String(v.code)[0] === 'S';
+		popover(cx, cy, EVENT_HELP.spins.title, [
+			{ key: 'code', label: 'Effect', type: 'select', value: spinCode(s), options: SPIN_OPTIONS, hint: 'None removes it. Help → Lane spins explains each one.' },
+			{ key: 'len', label: 'Length', type: 'text', value: fmtLen(s.l), hint: 'measures (1 = one 4/4 measure)' },
+			{ key: 'amp', label: 'Swing size', type: 'number', value: String(s.amp ?? 250), show: swing },
+			{ key: 'rep', label: 'Swings', type: 'number', value: String(s.rep ?? 3), show: swing },
+			{ key: 'dec', label: 'Decay', type: 'select', value: String(s.dec ?? 2), options: [['0', 'no decay'], ['1', 'linear'], ['2', 'squared']], show: swing },
+		], v => { const l = parseLen(v.len); this.setSpinAt(s.t, v.code, l > 0 ? l : s.l, { amp: parseInt(v.amp, 10) || 250, rep: parseInt(v.rep, 10) || 3, dec: +v.dec }); });
 	}
 	editCamPopover(key, p, cx, cy) {
 		const isTilt = key === 'tilt';
@@ -5188,6 +5217,13 @@ function buildMenus() {
 		]],
 		['Help', [
 			['Controls & shortcuts', 'F1', showHelp],
+			'-',
+			['Lane spins & swings', '', () => showGuide('g-spins')],
+			['Laser effects', '', () => showGuide('g-laser')],
+			['FX hold effects', '', () => showGuide('g-fx')],
+			['Wide lasers (2x)', '', () => showGuide('g-wide')],
+			['Custom effects (#define_fx / #define_filter)', '', () => showGuide('g-custom')],
+			'-',
 			['About KSH export', '', showAbout],
 		]],
 	];
@@ -5577,7 +5613,7 @@ function renderProps(body) {
 	if (e.kind === 'bpm') { body.append(sec('BPM change', helpNote('bpm'), row('Position', h('span', null, pos(e.item.t))), row('BPM', numInput(K.fmtNum(e.item.v), (v) => { const b = parseFloat(v); if (b > 0) ed.setBpmAt(e.item.t, b); })))); return; }
 	if (e.kind === 'stop') { body.append(sec('Stop', helpNote('stops'), row('Position', h('span', null, pos(e.item.t))), row('Length', numInput(fmtLen(e.item.l), (v) => { const l = parseLen(v); if (l > 0) ed.edit('Edit stop', c => ed.replaceIn(c.stops, e.item.id, { ...e.item, l })); }), h('span', { class: 'muted' }, 'measures')))); return; }
 	if (e.kind === 'sig') { body.append(sec('Time signature', helpNote('sig'), row('Measure', h('span', null, e.item.m + 1)), row('Beats', numInput(e.item.n + '/' + e.item.d, (v) => { const [n, d] = v.split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) ed.setSigAt(e.item.m, n, d); })))); return; }
-	if (e.kind === 'spin') { const s = e.item; body.append(sec('Spin / swing', helpNote('spins'), row('Position', h('span', null, pos(s.t))), row('Effect', (() => { const sl = h('select', { onchange: (ev) => ed.setSpinAt(s.t, ev.target.value, s.l, s) }, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l))); sl.value = spinCode(s); return sl; })()), row('Length', numInput(fmtLen(s.l), (v) => { const l = parseLen(v); if (l > 0) ed.setSpinAt(s.t, spinCode(s), l, s); }), h('span', { class: 'muted' }, 'measures')))); }
+	if (e.kind === 'spin') { const s = e.item; body.append(sec('Spin / swing', helpNote('spins'), row('Position', h('span', null, pos(s.t))), row('Effect', (() => { const sl = h('select', { onchange: (ev) => ed.setSpinAt(s.t, ev.target.value, s.l) }, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l))); sl.value = spinCode(s); return sl; })()), row('Length', numInput(fmtLen(s.l), (v) => { const l = parseLen(v); if (l > 0) ed.setSpinAt(s.t, spinCode(s), l); }), h('span', { class: 'muted' }, 'measures')), h('div', { class: 'note' }, 'Double-click the purple label on the lane to edit it there.'))); }
 }
 
 function renderChartTab(body) {
@@ -5962,6 +5998,92 @@ function showHelp() {
 		['M / H / P', 'Metronome / hitsounds / preview'],
 	];
 	showModal('Controls & shortcuts', '<table>' + rows.map(([k, v]) => `<tr><td><kbd>${esc(k)}</kbd></td><td>${esc(v)}</td></tr>`).join('') + '</table>');
+}
+// ---------------------------------------------------------------- effects guide (Help menu)
+const GUIDE_HTML = `
+<p>Jump to: <a href="#g-spins">Lane spins &amp; swings</a> · <a href="#g-laser">Laser effects</a> · <a href="#g-fx">FX hold effects</a> · <a href="#g-wide">Wide lasers (2x)</a> · <a href="#g-custom">Custom effects</a></p>
+
+<h3 id="g-spins">Lane spins &amp; swings (screen shake)</h3>
+<p>They move the whole lane for a moment. Put them on a <b>laser slam</b>: KSM, USC and SOUND VOLTEX all start them from a slam (the SDVX export drops any that are not on one). To add one, select the slam and use <i>Lane spin / swing</i> in Properties, or click the BPM column. Edit one by selecting its purple label on the lane, or double-click the label. The arrow is the direction; it usually matches the slam.</p>
+<table>
+<tr><td>Spin <code>@(</code> <code>@)</code></td><td>The lane does a full 360° roll to the left <code>(</code> or right <code>)</code>, overshoots a little and settles. The big "the whole screen turns" effect.</td></tr>
+<tr><td>Half spin <code>@&lt;</code> <code>@&gt;</code></td><td>The lane tips far over to one side (about a third of a turn), then swings back and wobbles to rest without going all the way round.</td></tr>
+<tr><td>Swing <code>S&lt;</code> <code>S&gt;</code></td><td>The lane does not rotate. It slides sideways back and forth like it was hit, then calms down. <i>Swing size</i> (default 250) is how far, <i>Swings</i> (default 3) is how many one-way moves, and <i>Decay</i> sets how fast it dies down (none / linear / squared).</td></tr>
+<tr><td>Length</td><td>How long the motion takes, in measures (1 = one 4/4 measure). In SOUND VOLTEX the spin's length includes its overshoot, so the export doubles it.</td></tr>
+</table>
+<p>The game also reacts to <b>every</b> slam by itself: a small sideways shake, a quick roll kick and the laser tilt. That's why SDVX charts don't need a "zoom side" kick. The editor's slam kicks (Zoom Side keyframes) only matter in USC / KSM.</p>
+
+<h3 id="g-laser">Laser effects (filtertype)</h3>
+<p>While a laser is held, it changes the music. The amount comes from how far the laser is from the side it starts on: the left (blue) laser counts from the left edge and the right (pink) laser from the right edge. With both lasers held, the one further from its edge wins. A laser resting on its starting edge does nothing. You choose the effect per laser (select a laser, <i>Laser effect</i>); it stays until another laser changes it.</p>
+<table>
+<tr><td><code>peak</code> (default)</td><td>A boosted, ringing band of frequencies that sweeps from low to high as the laser moves: the classic "wah" laser sound. In SOUND VOLTEX it follows the laser slightly late (80 ms) and lowers the rest of the music a little while turned.</td></tr>
+<tr><td><code>lpf1</code> low-pass</td><td>Cuts the treble: the further out, the more muffled ("underwater").</td></tr>
+<tr><td><code>hpf1</code> high-pass</td><td>Cuts the bass: the further out, the thinner and more "radio-like".</td></tr>
+<tr><td><code>bitc</code> bitcrusher</td><td>Makes the music crunchy and digital; the further out, the more lo-fi.</td></tr>
+<tr><td>custom name</td><td>A <code>#define_filter</code> (see below). If its type is an FX effect such as Retrigger, that effect runs for as long as a laser is held. SOUND VOLTEX calls this "auto tab".</td></tr>
+</table>
+<p><b>Filter gain</b> (<code>pfiltergain</code>, 0–100, default 50) sets how strong laser effects are in USC / KSM; 0 turns them off. SOUND VOLTEX has no such setting. <b>Filter delay</b> (<code>pfilterdelay</code>) is KSM's reaction delay in ms. Settings → <i>Effects sound like</i> picks whether the editor plays effects like SOUND VOLTEX or like USC.</p>
+
+<h3 id="g-fx">FX hold effects</h3>
+<p>An FX hold (orange long note) applies its effect to the music while it is held. The number after the name is the main setting, as in <code>Retrigger;16</code>. Many of them are "1/n note" lengths, so bigger numbers mean faster. FX chips (short orange notes) can play a key sound instead (clap, snare…).</p>
+<table>
+<tr><td>Retrigger;n</td><td>Grabs a 1/n-note slice and repeats it like a stuck record or a DJ stutter. 8 = 1/8 note, 16 = faster, 32 = buzzing.</td></tr>
+<tr><td>Gate;n</td><td>Chops the music on and off every 1/n note (a "trance gate").</td></tr>
+<tr><td>Flanger</td><td>A sweeping metallic "jet plane" whoosh.</td></tr>
+<tr><td>Phaser</td><td>A softer swirling sweep (USC / KSM only; SOUND VOLTEX has no phaser, so it is exported as Flanger).</td></tr>
+<tr><td>Wobble;n</td><td>A low-pass filter that opens and closes every 1/n note: the dubstep "wub wub".</td></tr>
+<tr><td>PitchShift;n</td><td>Raises the pitch by n semitones (12 = one octave up, negative = down).</td></tr>
+<tr><td>BitCrusher;n</td><td>Crunchy lo-fi sound; bigger n = crunchier.</td></tr>
+<tr><td>TapeStop;n</td><td>The music slows down to a stop like a turntable being switched off. Higher n = stops faster.</td></tr>
+<tr><td>Echo;n;fb</td><td>Repeats the slice every 1/n note while it fades out (fb = how much each repeat keeps, in %).</td></tr>
+<tr><td>SideChain</td><td>Ducks the volume on every beat and lets it swell back: the "pumping" sound.</td></tr>
+</table>
+<p>In SOUND VOLTEX, when FX-L and FX-R overlap, the later hold's effect replaces the earlier one instead of stacking (USC stacks them). Charts opened from a <code>.vox</code> use effects named <code>SV_…</code>. They are the same effects with the game's exact settings stored inside (see below). Plain effects such as <code>Retrigger;8</code> work in SOUND VOLTEX too: the export turns them into the game's closest settings.</p>
+
+<h3 id="g-wide">Wide lasers (2x)</h3>
+<p>A wide laser (<code>laserrange_l=2x</code> / <code>laserrange_r=2x</code>, the "Wide (2x)" box on a laser) covers twice the lane's width. The middle position stays in the middle, but the edges reach far outside the lane, so the laser can swing off the sides of the track. It's used for big sweeping laser sections. A laser is wide or normal from start to end; to switch, start a new laser. The editor marks wide lasers with "2x".</p>
+
+<h3 id="g-custom">Custom audio effects (#define_fx / #define_filter)</h3>
+<p>Write them in the Chart tab → <i>Advanced</i> → <i>Custom audio effects</i>, one per line. <code>#define_fx</code> makes an effect for FX holds; it then appears as "<i>name</i> (custom)" in the FX hold's effect list. <code>#define_filter</code> makes a laser effect; it then appears in the laser's <i>Laser effect</i> list.</p>
+<pre>#define_fx    FastRetrig type=Retrigger;waveLength=1/32;rate=60%
+#define_fx    DeepWob    type=Wobble;waveLength=1/8;loFreq=200;hiFreq=8000;Q=3.0
+#define_fx    Crunch     type=BitCrusher;reduction=20samples;amount=20samples
+#define_filter LaserGate type=Gate;waveLength=1/16
+#define_filter Stop      type=TapeStop;speed=20%</pre>
+<p>Format: <code>#define_fx &lt;name&gt; type=&lt;Effect&gt;;key=value;key=value…</code> (no spaces inside the list). Units: note lengths like <code>1/8</code>, times like <code>300ms</code>, samples like <code>80samples</code>, percentages like <code>60%</code>, frequencies in Hz as plain numbers.</p>
+<table>
+<tr><td>Retrigger</td><td><code>waveLength</code> slice length, <code>rate</code> how much of each slice sounds (70%), <code>updatePeriod</code> how often a new slice is grabbed (1/2), <code>mix</code></td></tr>
+<tr><td>Gate</td><td><code>waveLength</code>, <code>rate</code> on-time per step (50%), <code>mix</code></td></tr>
+<tr><td>Flanger</td><td><code>period</code> sweep time, <code>delay</code> (30samples), <code>depth</code> (45samples), <code>feedback</code> (60%), <code>stereoWidth</code>, <code>volume</code>, <code>mix</code></td></tr>
+<tr><td>Phaser</td><td><code>period</code>, <code>stage</code> (6), <code>loFreq</code>, <code>hiFreq</code>, <code>Q</code>, <code>feedback</code>, <code>stereoWidth</code>, <code>hiCutGain</code>, <code>mix</code></td></tr>
+<tr><td>Wobble</td><td><code>waveLength</code>, <code>loFreq</code> (500), <code>hiFreq</code> (20000), <code>Q</code> (1.414), <code>mix</code></td></tr>
+<tr><td>BitCrusher</td><td><code>reduction</code> (KSM) / <code>amount</code> (USC), e.g. <code>10samples</code>. Write both to be safe. <code>mix</code></td></tr>
+<tr><td>PitchShift</td><td><code>pitch</code> in semitones, <code>mix</code></td></tr>
+<tr><td>TapeStop</td><td><code>speed</code> (50%), <code>trigger</code>, <code>mix</code></td></tr>
+<tr><td>Echo</td><td><code>waveLength</code>, <code>feedbackLevel</code> (60%), <code>updatePeriod</code>, <code>mix</code></td></tr>
+<tr><td>SideChain</td><td><code>period</code> (1/4), <code>attackTime</code>, <code>holdTime</code>, <code>releaseTime</code>, <code>ratio</code> (5.0)</td></tr>
+<tr><td>Laser filters</td><td><code>#define_filter</code> also accepts <code>type=PeakingFilter</code>, <code>LowPassFilter</code> or <code>HighPassFilter</code></td></tr>
+</table>
+<p>A value can change with the laser position: <code>off&gt;min-max</code>. For example, <code>mix=0%&gt;50%-100%</code> means off when no laser is held, then 50% at the starting edge rising to 100% at the far side (USC / KSM). The editor's own playback reads only the main setting (<code>waveLength</code>, <code>feedbackLevel</code>, <code>amount</code>/<code>reduction</code>, <code>pitch</code>, <code>speed</code>). USC and KSM use all of them.</p>
+<p><b>SOUND VOLTEX settings (<code>sdvx=</code>).</b> Charts opened from a <code>.vox</code> keep the game's own numbers in an extra <code>sdvx=</code> key. USC and KSM ignore it, while the SDVX export and SOUND VOLTEX playback use it exactly. You can add or edit it yourself. Each one is the effect's id followed by its settings:</p>
+<table>
+<tr><td>1 Retrigger</td><td><code>1,count,mix,beats,feedback,gate,release</code>: <code>count</code> repeats of the first slice in every <code>beats</code>-long cycle; for example <code>1,8,95,2,1,0.85,0.15</code></td></tr>
+<tr><td>8 Echo</td><td><code>8,count,mix,beats,feedback,gate,release,0</code>, the same as Retrigger but each repeat is quieter by <code>feedback</code></td></tr>
+<tr><td>2 Gate</td><td><code>2,mix,steps,beats</code>: <code>steps</code> loud/quiet steps per <code>beats</code></td></tr>
+<tr><td>3 Flanger</td><td><code>3,mix,delayMs,rate,depth%,stages</code></td></tr>
+<tr><td>4 Tape stop</td><td><code>4,mix,speed(1–10),seconds</code></td></tr>
+<tr><td>5 Side chain</td><td><code>5,mix,beats,attack%,hold%,release%</code></td></tr>
+<tr><td>6 Wobble</td><td><code>6,filter(0 LPF,1 HPF,2 BPF),wave(0 saw up,1 saw down,2 sine,3 triangle,4 square),mix,freqA,freqB,perBeat,Q</code></td></tr>
+<tr><td>7 Bit crusher</td><td><code>7,mix,samples(1–30)</code></td></tr>
+<tr><td>9 Pitch shift</td><td><code>9,mix,semitones</code></td></tr>
+<tr><td>Laser filters</td><td><code>1,mix,lowHz,highHz,Q</code> (LPF), <code>2,mix,lowHz,highHz,Q</code> (HPF), <code>3,mix,samples</code> (bitcrush)</td></tr>
+</table>`;
+function showGuide(anchor) {
+	showModal('Effects, spins & lasers guide', GUIDE_HTML);
+	const b = $('#modalBody');
+	b.querySelectorAll('a[href^="#g-"]').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); const t = b.querySelector(a.getAttribute('href')); if (t) t.scrollIntoView({ block: 'start' }); }));
+	const t = anchor && b.querySelector('#' + anchor);
+	b.scrollTop = 0; if (t) t.scrollIntoView({ block: 'start' });
 }
 function showAbout() {
 	showModal('About KSH export', `

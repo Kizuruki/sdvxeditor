@@ -63,6 +63,16 @@ check('format 12: decimal laser positions, explicit spin length in 1/10 beats, C
 	const rows = raw.replace(/\r\n/g, '\n').split('#TRACK8\n')[1].split('\n#END')[0].split('\n');
 	assert.deepStrictEqual(rows, ['001,01,00\t1.000000\t1\t0\t0\t2\t0\t0\t0', '001,03,00\t0.500000\t0\t6\t0\t2\t0\t0\t30', '001,03,00\t0.000000\t2\t0\t0\t2\t0\t0\t0']);
 });
+check('a spin on a tick where both lasers slam is written once, on the slam that turns its way', () => {
+	const c = K.newChart();
+	c.laser[0] = [P({ t: 0, wide: false, pts: [P({ ry: 0, v: 0, vf: 0 }), P({ ry: 480, v: 0, vf: 50 }), P({ ry: 960, v: 50, vf: 50 })] })];
+	c.laser[1] = [P({ t: 0, wide: false, pts: [P({ ry: 0, v: 50, vf: 50 }), P({ ry: 480, v: 50, vf: 0 }), P({ ry: 960, v: 0, vf: 0 })] })];
+	c.spins = [P({ t: 480, kind: 'spin', dir: 1, l: 240 })];
+	const v = vox12(c), rolls = (tr) => v.split('#' + tr + '\n')[1].split('\n#END')[0].split('\n').filter(r => r.split('\t')[3] !== '0');
+	assert.deepStrictEqual([rolls('TRACK1').length, rolls('TRACK8').length], [0, 1]);
+	const back = SDVX.importVox(SDVX.buildVox(c).text, 'x_5m.vox').chart;
+	assert.deepStrictEqual(back.spins.map(s => [s.t, s.kind, s.dir]), [[480, 'spin', 1]]);
+});
 check('FX holds get one effect pair each (2-indexed), holds without effect use 0', () => {
 	const c = K.newChart();
 	c.fx[0] = [P({ t: 0, l: 240, fx: 'Retrigger;16' }), P({ t: 960, l: 240 })];

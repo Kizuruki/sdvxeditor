@@ -129,6 +129,13 @@ function buildMenus() {
 		]],
 		['Help', [
 			['Controls & shortcuts', 'F1', showHelp],
+			'-',
+			['Lane spins & swings', '', () => showGuide('g-spins')],
+			['Laser effects', '', () => showGuide('g-laser')],
+			['FX hold effects', '', () => showGuide('g-fx')],
+			['Wide lasers (2x)', '', () => showGuide('g-wide')],
+			['Custom effects (#define_fx / #define_filter)', '', () => showGuide('g-custom')],
+			'-',
 			['About KSH export', '', showAbout],
 		]],
 	];
@@ -518,7 +525,7 @@ function renderProps(body) {
 	if (e.kind === 'bpm') { body.append(sec('BPM change', helpNote('bpm'), row('Position', h('span', null, pos(e.item.t))), row('BPM', numInput(K.fmtNum(e.item.v), (v) => { const b = parseFloat(v); if (b > 0) ed.setBpmAt(e.item.t, b); })))); return; }
 	if (e.kind === 'stop') { body.append(sec('Stop', helpNote('stops'), row('Position', h('span', null, pos(e.item.t))), row('Length', numInput(fmtLen(e.item.l), (v) => { const l = parseLen(v); if (l > 0) ed.edit('Edit stop', c => ed.replaceIn(c.stops, e.item.id, { ...e.item, l })); }), h('span', { class: 'muted' }, 'measures')))); return; }
 	if (e.kind === 'sig') { body.append(sec('Time signature', helpNote('sig'), row('Measure', h('span', null, e.item.m + 1)), row('Beats', numInput(e.item.n + '/' + e.item.d, (v) => { const [n, d] = v.split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) ed.setSigAt(e.item.m, n, d); })))); return; }
-	if (e.kind === 'spin') { const s = e.item; body.append(sec('Spin / swing', helpNote('spins'), row('Position', h('span', null, pos(s.t))), row('Effect', (() => { const sl = h('select', { onchange: (ev) => ed.setSpinAt(s.t, ev.target.value, s.l, s) }, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l))); sl.value = spinCode(s); return sl; })()), row('Length', numInput(fmtLen(s.l), (v) => { const l = parseLen(v); if (l > 0) ed.setSpinAt(s.t, spinCode(s), l, s); }), h('span', { class: 'muted' }, 'measures')))); }
+	if (e.kind === 'spin') { const s = e.item; body.append(sec('Spin / swing', helpNote('spins'), row('Position', h('span', null, pos(s.t))), row('Effect', (() => { const sl = h('select', { onchange: (ev) => ed.setSpinAt(s.t, ev.target.value, s.l) }, SPIN_OPTIONS.map(([v, l]) => h('option', { value: v }, l))); sl.value = spinCode(s); return sl; })()), row('Length', numInput(fmtLen(s.l), (v) => { const l = parseLen(v); if (l > 0) ed.setSpinAt(s.t, spinCode(s), l); }), h('span', { class: 'muted' }, 'measures')), h('div', { class: 'note' }, 'Double-click the purple label on the lane to edit it there.'))); }
 }
 
 function renderChartTab(body) {
@@ -903,6 +910,92 @@ function showHelp() {
 		['M / H / P', 'Metronome / hitsounds / preview'],
 	];
 	showModal('Controls & shortcuts', '<table>' + rows.map(([k, v]) => `<tr><td><kbd>${esc(k)}</kbd></td><td>${esc(v)}</td></tr>`).join('') + '</table>');
+}
+// ---------------------------------------------------------------- effects guide (Help menu)
+const GUIDE_HTML = `
+<p>Jump to: <a href="#g-spins">Lane spins &amp; swings</a> · <a href="#g-laser">Laser effects</a> · <a href="#g-fx">FX hold effects</a> · <a href="#g-wide">Wide lasers (2x)</a> · <a href="#g-custom">Custom effects</a></p>
+
+<h3 id="g-spins">Lane spins &amp; swings (screen shake)</h3>
+<p>They move the whole lane for a moment. Put them on a <b>laser slam</b>: KSM, USC and SOUND VOLTEX all start them from a slam (the SDVX export drops any that are not on one). To add one, select the slam and use <i>Lane spin / swing</i> in Properties, or click the BPM column. Edit one by selecting its purple label on the lane, or double-click the label. The arrow is the direction; it usually matches the slam.</p>
+<table>
+<tr><td>Spin <code>@(</code> <code>@)</code></td><td>The lane does a full 360° roll to the left <code>(</code> or right <code>)</code>, overshoots a little and settles. The big "the whole screen turns" effect.</td></tr>
+<tr><td>Half spin <code>@&lt;</code> <code>@&gt;</code></td><td>The lane tips far over to one side (about a third of a turn), then swings back and wobbles to rest without going all the way round.</td></tr>
+<tr><td>Swing <code>S&lt;</code> <code>S&gt;</code></td><td>The lane does not rotate. It slides sideways back and forth like it was hit, then calms down. <i>Swing size</i> (default 250) is how far, <i>Swings</i> (default 3) is how many one-way moves, and <i>Decay</i> sets how fast it dies down (none / linear / squared).</td></tr>
+<tr><td>Length</td><td>How long the motion takes, in measures (1 = one 4/4 measure). In SOUND VOLTEX the spin's length includes its overshoot, so the export doubles it.</td></tr>
+</table>
+<p>The game also reacts to <b>every</b> slam by itself: a small sideways shake, a quick roll kick and the laser tilt. That's why SDVX charts don't need a "zoom side" kick. The editor's slam kicks (Zoom Side keyframes) only matter in USC / KSM.</p>
+
+<h3 id="g-laser">Laser effects (filtertype)</h3>
+<p>While a laser is held, it changes the music. The amount comes from how far the laser is from the side it starts on: the left (blue) laser counts from the left edge and the right (pink) laser from the right edge. With both lasers held, the one further from its edge wins. A laser resting on its starting edge does nothing. You choose the effect per laser (select a laser, <i>Laser effect</i>); it stays until another laser changes it.</p>
+<table>
+<tr><td><code>peak</code> (default)</td><td>A boosted, ringing band of frequencies that sweeps from low to high as the laser moves: the classic "wah" laser sound. In SOUND VOLTEX it follows the laser slightly late (80 ms) and lowers the rest of the music a little while turned.</td></tr>
+<tr><td><code>lpf1</code> low-pass</td><td>Cuts the treble: the further out, the more muffled ("underwater").</td></tr>
+<tr><td><code>hpf1</code> high-pass</td><td>Cuts the bass: the further out, the thinner and more "radio-like".</td></tr>
+<tr><td><code>bitc</code> bitcrusher</td><td>Makes the music crunchy and digital; the further out, the more lo-fi.</td></tr>
+<tr><td>custom name</td><td>A <code>#define_filter</code> (see below). If its type is an FX effect such as Retrigger, that effect runs for as long as a laser is held. SOUND VOLTEX calls this "auto tab".</td></tr>
+</table>
+<p><b>Filter gain</b> (<code>pfiltergain</code>, 0–100, default 50) sets how strong laser effects are in USC / KSM; 0 turns them off. SOUND VOLTEX has no such setting. <b>Filter delay</b> (<code>pfilterdelay</code>) is KSM's reaction delay in ms. Settings → <i>Effects sound like</i> picks whether the editor plays effects like SOUND VOLTEX or like USC.</p>
+
+<h3 id="g-fx">FX hold effects</h3>
+<p>An FX hold (orange long note) applies its effect to the music while it is held. The number after the name is the main setting, as in <code>Retrigger;16</code>. Many of them are "1/n note" lengths, so bigger numbers mean faster. FX chips (short orange notes) can play a key sound instead (clap, snare…).</p>
+<table>
+<tr><td>Retrigger;n</td><td>Grabs a 1/n-note slice and repeats it like a stuck record or a DJ stutter. 8 = 1/8 note, 16 = faster, 32 = buzzing.</td></tr>
+<tr><td>Gate;n</td><td>Chops the music on and off every 1/n note (a "trance gate").</td></tr>
+<tr><td>Flanger</td><td>A sweeping metallic "jet plane" whoosh.</td></tr>
+<tr><td>Phaser</td><td>A softer swirling sweep (USC / KSM only; SOUND VOLTEX has no phaser, so it is exported as Flanger).</td></tr>
+<tr><td>Wobble;n</td><td>A low-pass filter that opens and closes every 1/n note: the dubstep "wub wub".</td></tr>
+<tr><td>PitchShift;n</td><td>Raises the pitch by n semitones (12 = one octave up, negative = down).</td></tr>
+<tr><td>BitCrusher;n</td><td>Crunchy lo-fi sound; bigger n = crunchier.</td></tr>
+<tr><td>TapeStop;n</td><td>The music slows down to a stop like a turntable being switched off. Higher n = stops faster.</td></tr>
+<tr><td>Echo;n;fb</td><td>Repeats the slice every 1/n note while it fades out (fb = how much each repeat keeps, in %).</td></tr>
+<tr><td>SideChain</td><td>Ducks the volume on every beat and lets it swell back: the "pumping" sound.</td></tr>
+</table>
+<p>In SOUND VOLTEX, when FX-L and FX-R overlap, the later hold's effect replaces the earlier one instead of stacking (USC stacks them). Charts opened from a <code>.vox</code> use effects named <code>SV_…</code>. They are the same effects with the game's exact settings stored inside (see below). Plain effects such as <code>Retrigger;8</code> work in SOUND VOLTEX too: the export turns them into the game's closest settings.</p>
+
+<h3 id="g-wide">Wide lasers (2x)</h3>
+<p>A wide laser (<code>laserrange_l=2x</code> / <code>laserrange_r=2x</code>, the "Wide (2x)" box on a laser) covers twice the lane's width. The middle position stays in the middle, but the edges reach far outside the lane, so the laser can swing off the sides of the track. It's used for big sweeping laser sections. A laser is wide or normal from start to end; to switch, start a new laser. The editor marks wide lasers with "2x".</p>
+
+<h3 id="g-custom">Custom audio effects (#define_fx / #define_filter)</h3>
+<p>Write them in the Chart tab → <i>Advanced</i> → <i>Custom audio effects</i>, one per line. <code>#define_fx</code> makes an effect for FX holds; it then appears as "<i>name</i> (custom)" in the FX hold's effect list. <code>#define_filter</code> makes a laser effect; it then appears in the laser's <i>Laser effect</i> list.</p>
+<pre>#define_fx    FastRetrig type=Retrigger;waveLength=1/32;rate=60%
+#define_fx    DeepWob    type=Wobble;waveLength=1/8;loFreq=200;hiFreq=8000;Q=3.0
+#define_fx    Crunch     type=BitCrusher;reduction=20samples;amount=20samples
+#define_filter LaserGate type=Gate;waveLength=1/16
+#define_filter Stop      type=TapeStop;speed=20%</pre>
+<p>Format: <code>#define_fx &lt;name&gt; type=&lt;Effect&gt;;key=value;key=value…</code> (no spaces inside the list). Units: note lengths like <code>1/8</code>, times like <code>300ms</code>, samples like <code>80samples</code>, percentages like <code>60%</code>, frequencies in Hz as plain numbers.</p>
+<table>
+<tr><td>Retrigger</td><td><code>waveLength</code> slice length, <code>rate</code> how much of each slice sounds (70%), <code>updatePeriod</code> how often a new slice is grabbed (1/2), <code>mix</code></td></tr>
+<tr><td>Gate</td><td><code>waveLength</code>, <code>rate</code> on-time per step (50%), <code>mix</code></td></tr>
+<tr><td>Flanger</td><td><code>period</code> sweep time, <code>delay</code> (30samples), <code>depth</code> (45samples), <code>feedback</code> (60%), <code>stereoWidth</code>, <code>volume</code>, <code>mix</code></td></tr>
+<tr><td>Phaser</td><td><code>period</code>, <code>stage</code> (6), <code>loFreq</code>, <code>hiFreq</code>, <code>Q</code>, <code>feedback</code>, <code>stereoWidth</code>, <code>hiCutGain</code>, <code>mix</code></td></tr>
+<tr><td>Wobble</td><td><code>waveLength</code>, <code>loFreq</code> (500), <code>hiFreq</code> (20000), <code>Q</code> (1.414), <code>mix</code></td></tr>
+<tr><td>BitCrusher</td><td><code>reduction</code> (KSM) / <code>amount</code> (USC), e.g. <code>10samples</code>. Write both to be safe. <code>mix</code></td></tr>
+<tr><td>PitchShift</td><td><code>pitch</code> in semitones, <code>mix</code></td></tr>
+<tr><td>TapeStop</td><td><code>speed</code> (50%), <code>trigger</code>, <code>mix</code></td></tr>
+<tr><td>Echo</td><td><code>waveLength</code>, <code>feedbackLevel</code> (60%), <code>updatePeriod</code>, <code>mix</code></td></tr>
+<tr><td>SideChain</td><td><code>period</code> (1/4), <code>attackTime</code>, <code>holdTime</code>, <code>releaseTime</code>, <code>ratio</code> (5.0)</td></tr>
+<tr><td>Laser filters</td><td><code>#define_filter</code> also accepts <code>type=PeakingFilter</code>, <code>LowPassFilter</code> or <code>HighPassFilter</code></td></tr>
+</table>
+<p>A value can change with the laser position: <code>off&gt;min-max</code>. For example, <code>mix=0%&gt;50%-100%</code> means off when no laser is held, then 50% at the starting edge rising to 100% at the far side (USC / KSM). The editor's own playback reads only the main setting (<code>waveLength</code>, <code>feedbackLevel</code>, <code>amount</code>/<code>reduction</code>, <code>pitch</code>, <code>speed</code>). USC and KSM use all of them.</p>
+<p><b>SOUND VOLTEX settings (<code>sdvx=</code>).</b> Charts opened from a <code>.vox</code> keep the game's own numbers in an extra <code>sdvx=</code> key. USC and KSM ignore it, while the SDVX export and SOUND VOLTEX playback use it exactly. You can add or edit it yourself. Each one is the effect's id followed by its settings:</p>
+<table>
+<tr><td>1 Retrigger</td><td><code>1,count,mix,beats,feedback,gate,release</code>: <code>count</code> repeats of the first slice in every <code>beats</code>-long cycle; for example <code>1,8,95,2,1,0.85,0.15</code></td></tr>
+<tr><td>8 Echo</td><td><code>8,count,mix,beats,feedback,gate,release,0</code>, the same as Retrigger but each repeat is quieter by <code>feedback</code></td></tr>
+<tr><td>2 Gate</td><td><code>2,mix,steps,beats</code>: <code>steps</code> loud/quiet steps per <code>beats</code></td></tr>
+<tr><td>3 Flanger</td><td><code>3,mix,delayMs,rate,depth%,stages</code></td></tr>
+<tr><td>4 Tape stop</td><td><code>4,mix,speed(1–10),seconds</code></td></tr>
+<tr><td>5 Side chain</td><td><code>5,mix,beats,attack%,hold%,release%</code></td></tr>
+<tr><td>6 Wobble</td><td><code>6,filter(0 LPF,1 HPF,2 BPF),wave(0 saw up,1 saw down,2 sine,3 triangle,4 square),mix,freqA,freqB,perBeat,Q</code></td></tr>
+<tr><td>7 Bit crusher</td><td><code>7,mix,samples(1–30)</code></td></tr>
+<tr><td>9 Pitch shift</td><td><code>9,mix,semitones</code></td></tr>
+<tr><td>Laser filters</td><td><code>1,mix,lowHz,highHz,Q</code> (LPF), <code>2,mix,lowHz,highHz,Q</code> (HPF), <code>3,mix,samples</code> (bitcrush)</td></tr>
+</table>`;
+function showGuide(anchor) {
+	showModal('Effects, spins & lasers guide', GUIDE_HTML);
+	const b = $('#modalBody');
+	b.querySelectorAll('a[href^="#g-"]').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); const t = b.querySelector(a.getAttribute('href')); if (t) t.scrollIntoView({ block: 'start' }); }));
+	const t = anchor && b.querySelector('#' + anchor);
+	b.scrollTop = 0; if (t) t.scrollIntoView({ block: 'start' });
 }
 function showAbout() {
 	showModal('About KSH export', `

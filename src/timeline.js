@@ -274,6 +274,8 @@ class TimelineView {
 		}
 	}
 
+	slamH() { return Math.max(10, Math.min(28, 60 * this.ppt)); } // drawn height of a slam (also its click area)
+
 	laserPath(sec, lane, cb) { // calls cb(kind, ...) for every drawable piece of a section
 		const pts = sec.pts;
 		for (let i = 0; i < pts.length; i++) {
@@ -295,14 +297,15 @@ class TimelineView {
 			for (let i = i0 - 1; i >= 0; i--) {
 				const sec = arr[i];
 				if (K.sectionEndTick(sec) < t0) { if (sec.t + 960 * 32 < t0) break; continue; }
-				const slamH = Math.max(5, Math.min(14, 30 * this.ppt));
+				const slamH = this.slamH();
 				c.fillStyle = fill;
 				// body
 				this.laserPath(sec, lane, (kind, a, b, cc, d, p) => {
 					if (kind === 'slam') {
 						const y = this.yOf(a), x0 = this.laserX(b), x1 = this.laserX(cc);
-						c.fillRect(Math.min(x0, x1) - hw, y - slamH, Math.abs(x1 - x0) + hw * 2, slamH);
-						c.fillStyle = edge; c.fillRect(Math.min(x0, x1) - hw, y - slamH, Math.abs(x1 - x0) + hw * 2, 2); c.fillStyle = fill;
+						const sx = Math.min(x0, x1) - hw, sw = Math.abs(x1 - x0) + hw * 2;
+						c.fillRect(sx, y - slamH, sw, slamH); c.fillRect(sx, y - slamH, sw, slamH); // double fill: slams read stronger than the trail
+						c.fillStyle = edge; c.fillRect(sx, y - slamH, sw, 2); c.fillRect(sx, y - 1, sw, 1); c.fillStyle = fill;
 					} else {
 						const ya = this.yOf(a), yb = this.yOf(cc);
 						if (ya < -50 && yb < -50) return; if (ya > this.h + 50 && yb > this.h + 50) return;
@@ -351,6 +354,7 @@ class TimelineView {
 	_drawSpins(t0, t1) {
 		const c = this.ctx, ed = this.ed;
 		const font = UI_FONT;
+		this.spinHits = []; // label boxes, clickable with any tool
 		for (const s of ed.chart.spins) {
 			if (s.t + s.l < t0 || s.t > t1) continue;
 			const y0 = this.yOf(s.t), y1 = this.yOf(s.t + s.l);
@@ -360,6 +364,7 @@ class TimelineView {
 			c.font = '600 10px ' + font; c.textBaseline = 'middle';
 			const w = c.measureText(lab).width + 8;
 			c.fillStyle = ed.sel.has(s.id) ? '#7fe4ff' : '#9b5cf0'; c.fillRect(x - w + 3, y0 - 8, w, 14);
+			this.spinHits.push({ x0: x - w + 3, x1: x + 3, y0: y0 - 8, y1: y0 + 6, item: s });
 			c.fillStyle = '#fff'; c.fillText(lab, x - w + 7, y0 - 1);
 		}
 	}

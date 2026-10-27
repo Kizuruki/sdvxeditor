@@ -80,6 +80,19 @@ const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL ') + m); if (!c) fail
   await p.selectOption('.sec:has(h4:text("Lane spin")) select', '@(');
   s = await st();
   ok(JSON.stringify(s.spins) === '[[2160,"spin",-1,960]]', 'spin @( added on the slam from the properties panel');
+  // the purple label: click selects the spin (any tool), its Properties change it, double-click edits it in place
+  const chip = await p.evaluate(() => { const { tl } = window.KSMEditor; tl.draw && tl.draw(); const r = tl.cv.getBoundingClientRect(), h = tl.spinHits[0]; return { x: r.left + (h.x0 + h.x1) / 2, y: r.top + (h.y0 + h.y1) / 2 }; });
+  const btBefore = JSON.stringify(s.bt);
+  await p.keyboard.press('2'); // BT tool
+  await click(chip);
+  await p.selectOption('.sec:has(h4:text("Spin / swing")) select', '@>');
+  s = await st();
+  ok(JSON.stringify(s.spins) === '[[2160,"half",1,960]]' && JSON.stringify(s.bt) === btBefore, 'spin label selects with the BT tool and its Properties change it to a half spin ' + JSON.stringify([s.spins, s.bt]));
+  await click(chip); await p.waitForTimeout(450); await p.mouse.click(chip.x, chip.y); await p.mouse.click(chip.x, chip.y); await p.waitForTimeout(100);
+  await p.selectOption('#popover select >> nth=0', '@('); await p.click('#popover button:has-text("OK")');
+  s = await st();
+  ok(JSON.stringify(s.spins) === '[[2160,"spin",-1,960]]', 'double-clicking the spin label edits it in a popup');
+  await p.keyboard.press('1'); // back to Select
 
   console.log('Camera');
   await click(await pos('cam', 'zoom_top', 0, 960));
