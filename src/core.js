@@ -885,8 +885,8 @@ function bakeGraph(pts, step, roundInt) {
 }
 // Chart for unnamed sdvx clone (USC): no curves, rotation_deg folded into manual tilt
 // (KSM v2 uses the same sign: rotation_deg 10 == tilt 1); scroll_speed is written as a percentage by exportKsh.
-function toUsc(c, warnings) {
-	const d = toKsmV1({ ...c, cam: { ...c.cam, scroll_speed: [], rotation_deg: [] } }, warnings);
+function toUsc(c, warnings, label = 'USC') {
+	const d = toKsmV1({ ...c, cam: { ...c.cam, scroll_speed: [], rotation_deg: [] } }, warnings, label);
 	d.cam.scroll_speed = bakeGraph(c.cam.scroll_speed, 15, false);
 	const rot = bakeGraph(c.cam.rotation_deg, 15, false);
 	if (rot.some(p => p.v !== 0 || (typeof p.vf === 'number' && p.vf !== 0))) {
@@ -923,11 +923,11 @@ function toUsc(c, warnings) {
 			out.push(np);
 		}
 		d.tilt = out;
-		warnings.push({ t: rot[0].t, msg: 'rotation_deg was converted to manual tilt (USC has no rotation_deg).' + (replacedAuto ? ' While the lane is rotated, the automatic laser tilt is off.' : '') });
+		warnings.push({ t: rot[0].t, msg: 'rotation_deg was converted to manual tilt (' + label + ' has no rotation_deg).' + (replacedAuto ? ' While the lane is rotated, the automatic laser tilt is off.' : '') });
 	}
 	return d;
 }
-function toKsmV1(c, warnings) {
+function toKsmV1(c, warnings, label = 'KSM v1') {
 	const d = cloneChart(c);
 	const bake = bakeGraph;
 	let baked = 0;
@@ -951,7 +951,7 @@ function toKsmV1(c, warnings) {
 		}
 		return { ...sec, pts };
 	}));
-	if (baked) warnings.push({ t: 0, msg: 'Curves were converted to straight steps for KSM v1.' });
+	if (baked) warnings.push({ t: 0, msg: 'Curves were converted to straight steps for ' + label + '.' });
 	if (d.cam.scroll_speed.length) { warnings.push({ t: d.cam.scroll_speed[0].t, msg: 'scroll_speed is not supported by KSM v1 and was left out.' }); d.cam.scroll_speed = []; }
 	if (d.cam.rotation_deg.length) { warnings.push({ t: d.cam.rotation_deg[0].t, msg: 'rotation_deg is not supported by KSM v1 and was left out.' }); d.cam.rotation_deg = []; }
 	return d;
@@ -988,6 +988,13 @@ function validateChart(c) {
 	for (const k of ['scroll_speed', 'rotation_deg']) if (c.cam[k].length) w.push({ t: c.cam[k][0].t, level: 'info', msg: `${k} only works in KSM v2 (ignored by KSM v1).` });
 	const curved = c.laser.some(l => l.some(s => s.pts.some(p => !isLinear(p)))) || CAM_KEYS.some(k => c.cam[k].some(p => !isLinear(p))) || c.tilt.some(p => !isLinear(p));
 	if (curved) w.push({ t: 0, level: 'info', msg: 'Curves only work in KSM v2. Use "Export for KSM v1" to convert them to steps.' });
+	// sound: things that make lasers / FX holds silent
+	const hasLasers = c.laser.some(l => l.length);
+	const pg0 = c.meta.pfiltergain === '' || c.meta.pfiltergain === undefined ? 50 : parseFloat(c.meta.pfiltergain);
+	if (hasLasers && pg0 === 0) w.push({ t: 0, level: 'warn', msg: 'pfiltergain is 0 in the header, so lasers make no sound effect until a "Laser effect strength" event raises it. KSM\'s default is 50.' });
+	const silentHolds = c.fx.reduce((a, l) => a + l.filter(n => n.l > 0 && !n.fx).length, 0);
+	if (silentHolds) w.push({ t: (c.fx.flat().find(n => n.l > 0 && !n.fx) || { t: 0 }).t, level: 'info', msg: `${silentHolds} FX hold${silentHolds > 1 ? 's have' : ' has'} no effect set (fx-l= / fx-r= empty), so ${silentHolds > 1 ? 'they change' : 'it changes'} nothing in the music.` });
+	if (+(c.meta.chokkakuvol || 50) === 0 && c.laser.some(l => l.some(s => s.pts.some(p => p.v !== p.vf)))) w.push({ t: 0, level: 'info', msg: 'chokkakuvol is 0, so slams are silent.' });
 	return w.sort((a, b) => a.t - b.t);
 }
 

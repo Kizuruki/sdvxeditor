@@ -52,6 +52,7 @@ class AudioEngine {
 			this.fxNode = new AudioWorkletNode(ctx, 'ksm-fx', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
 			this.fxNode.connect(this.musicGain);
 			this.fxNode.port.postMessage({ cmd: 'fx', on: this.fxEnabled !== false });
+			this.fxNode.port.postMessage({ cmd: 'mode', mode: this.fxMode || 'sdvx' });
 			if (this.buffer) this._sendPcm();
 			if (this.pendingSched) this.fxNode.port.postMessage({ cmd: 'sched', sched: this.pendingSched });
 		}).catch((e) => { console.warn('FX worklet unavailable, effects disabled', e); this.fxNode = null; });
@@ -65,6 +66,7 @@ class AudioEngine {
 	get fxReady() { return !!(this.fxNode && this.pcmSent); }
 	setSchedule(sched) { this.pendingSched = sched; if (this.fxNode) this.fxNode.port.postMessage({ cmd: 'sched', sched }); }
 	setFxEnabled(on) { this.fxEnabled = on; if (this.fxNode) this.fxNode.port.postMessage({ cmd: 'fx', on }); }
+	setFxMode(mode) { if (mode === this.fxMode) return; this.fxMode = mode; if (this.fxNode) this.fxNode.port.postMessage({ cmd: 'mode', mode }); }
 
 	async load(arrayBuffer, name) {
 		const ctx = this.ensure();

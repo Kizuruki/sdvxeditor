@@ -40,7 +40,7 @@ const DEFAULT_SETTINGS = {
 	laneW: 42, showWave: true, showPreview: true, rate: 1, follow: true,
 	speedMode: 'mod', modSpeed: 800, hiSpeed: 5, drawOffsetMs: 0, previewW: 340,
 	autoKick: true, kickAmount: 30, kickLen: 120, showTiltGhost: true,
-	volMusic: 0.8, volHit: 0.55, volGame: 0.7, volMetro: 0, hitsounds: true, gameSounds: true, playFx: true, latencyMs: 0, autosave: true, placeSound: false,
+	volMusic: 0.8, volHit: 0.55, volGame: 0.7, volMetro: 0, hitsounds: true, gameSounds: true, playFx: true, fxSound: 'sdvx', latencyMs: 0, autosave: true, placeSound: false,
 	cols: { zoom_top: true, zoom_bottom: true, zoom_side: true, tilt: true, rotation_deg: true, center_split: false, scroll_speed: false },
 };
 
@@ -72,6 +72,7 @@ class Editor {
 		const s = this.settings;
 		this.audio.vol = { music: s.volMusic, hit: s.volHit, game: s.volGame ?? 0.7, metro: s.volMetro };
 		this.audio.setFxEnabled(s.playFx !== false);
+		this.audio.setFxMode(s.fxSound === 'usc' ? 'usc' : 'sdvx');
 		this.audio.userLatency = (s.latencyMs || 0) / 1000;
 		this.audio.applyVolumes();
 	}

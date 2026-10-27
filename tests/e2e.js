@@ -198,7 +198,7 @@ const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL ') + m); if (!c) fail
   const [zdl] = await Promise.all([p.waitForEvent('download', { timeout: 60000 }), p.click('#modal button:has-text("Export .zip")')]);
   const zpath = path.join(SHOTS, 'export.zip'); await zdl.saveAs(zpath);
   const zbytes = require('fs').readFileSync(zpath).toString('latin1');
-  ok(/music\/\d{4}_[\w-]+\/\d{4}_[\w-]+_\d[naeimu]\.vox/.test(zbytes) && /\.2dx/.test(zbytes) && /_pre\.2dx/.test(zbytes) && /others\/music_db\.merged\.xml/.test(zbytes), 'SDVX export downloads a zip with .vox, .2dx, preview and music_db (' + zdl.suggestedFilename() + ')');
+  ok(/\d{4}_[\w-]+\/\d{4}_[\w-]+_\d[naeimu]\.vox/.test(zbytes) && /\d{4}_[\w-]+\/\d{4}_[\w-]+\.2dx/.test(zbytes) && /_pre\.2dx/.test(zbytes) && /music_db entry/.test(zbytes) && !/music\//.test(zbytes), 'SDVX export downloads a zip with .vox, .2dx, preview and music_db (' + zdl.suggestedFilename() + ')');
   await p.waitForSelector('#modal:not(.hidden) >> text=SOUND VOLTEX export');
   await p.click('#modal button:has-text("OK")');
   await p.click('#menus >> text=File');

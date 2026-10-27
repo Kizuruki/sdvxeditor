@@ -471,7 +471,7 @@ function renderProps(body) {
 			row('Engine tilt', tiltSel),
 			row('Laser effect', fSel),
 			row('Effect strength', gIn, h('span', { class: 'muted' }, '% (pfiltergain)')),
-			h('div', { class: 'note' }, 'Engine tilt: the game tilts the lane toward the lasers on its own (±10°, shown as the dashed line in the Tilt column). "Off" writes tilt=zero at the start of this laser and restores the previous mode at its end. Laser effect / strength are written as filtertype / pfiltergain at the start of this laser and stay until changed.'),
+			h('div', { class: 'note' }, 'Engine tilt: the game tilts the lane toward the lasers on its own (±10°, shown as the dashed line in the Tilt column). "Off" writes tilt=zero at the start of this laser and restores the previous mode at its end. Laser effect / strength are written as filtertype / pfiltergain at the start of this laser and stay until changed. Strength only matters in USC / KSM (SOUND VOLTEX has no laser strength).'),
 			h('div', { class: 'btns' },
 				h('button', { onclick: () => ed.setSel(s.pts.map(q => q.id)) }, 'Select all points'),
 				h('button', { onclick: () => ed.edit('Delete point', () => ed.deleteLaserPoints(new Set([p.id]))) }, 'Delete point'),
@@ -558,7 +558,8 @@ function renderChartTab(body) {
 		row('Video (v)', txt('v', 'optional')), row('Video offset', txt('vo', '0', '70px'))));
 	const auto = h('input', { type: 'checkbox', checked: m.chokkakuautovol === '1', onchange: (e) => set('chokkakuautovol', e.target.checked ? '1' : '0') });
 	body.append(sec('Laser sound',
-		row('Laser filter', pick('filtertype', K.LASER_FILTERS)), row('Filter gain', txt('pfiltergain', '50', '60px')),
+		row('Laser filter', pick('filtertype', K.LASER_FILTERS)), row('Filter gain', txt('pfiltergain', '50', '60px'), h('span', { class: 'muted' }, '0–100, KSM default 50')),
+		h('div', { class: 'note' }, 'Lasers change the music while they are held: the further a laser moves from the side it starts on (left laser toward the right, right laser toward the left), the stronger the effect. A laser resting on its starting edge does nothing. Filter gain (pfiltergain) sets how strong the effect is in USC / KSM; 0 silences it, and 50 is KSM\'s default and the usual value. SOUND VOLTEX has no such setting (its laser filter is always on), so with Settings → "Effects sound like: SOUND VOLTEX" the gain does not change what you hear.'),
 		row('Filter delay', txt('pfilterdelay', '40', '60px'), h('span', { class: 'muted' }, 'ms')),
 		row('Slam volume', txt('chokkakuvol', '50', '60px'), h('span', { class: 'muted' }, '%')), row('Auto slam volume', auto),
 		row('Gauge total', txt('total', 'auto', '70px'))));
@@ -624,7 +625,8 @@ function renderSettings(body) {
 		row('Hitsounds', chk('hitsounds', () => TR.hits.classList.toggle('on', S.hitsounds))),
 		row('Slam & FX chip sounds', chk('gameSounds')),
 		row('Play FX effects', chk('playFx')),
-		h('div', { class: 'note' }, 'Hitsounds are editor ticks for every note. Slam & FX chip sounds are the sounds the game plays (chokkakuse / chokkakuvol, fx-l_se / fx-r_se). "Play FX effects" applies FX hold effects and the laser filter to the music the way USC does, so you hear Retrigger, Gate, Flanger, peak/LPF/HPF/bitcrush etc. while editing.'),
+		row('Effects sound like', h('select', { onchange: (e) => { S.fxSound = e.target.value; save(); } }, h('option', { value: 'sdvx', selected: S.fxSound !== 'usc' }, 'SOUND VOLTEX'), h('option', { value: 'usc', selected: S.fxSound === 'usc' }, 'USC'))),
+		h('div', { class: 'note' }, 'Hitsounds are editor ticks for every note. Slam & FX chip sounds are the sounds the game plays (chokkakuse / chokkakuvol, fx-l_se / fx-r_se). "Play FX effects" applies FX hold effects and the laser filter to the music while you edit. SOUND VOLTEX plays them the way the arcade game does with the parameters the .vox export writes: the laser filter is always on, follows the knob 80 ms late and lowers the music a little, and overlapping FX holds do not stack. USC plays them the way USC does with this .ksh, including pfiltergain.'),
 		row('Click when placing', chk('placeSound')),
 		row('Visual latency', ...slider('latencyMs', -150, 150, 1, v => v + ' ms')),
 		h('div', { class: 'note' }, 'Playback timing comes from the audio clock and already corrects for your output device. Only adjust latency if the cursor still looks early (+) or late (−) against what you hear, e.g. with Bluetooth headphones.')));
@@ -676,12 +678,22 @@ function slamKickDialog(add) {
 }
 
 // ---------------------------------------------------------------- files
-function pickFiles(accept) { const fi = $('#fileInput'); fi.accept = accept || '.ksh,.ogg,.mp3,.wav,.flac,.m4a,.opus,audio/*'; fi.value = ''; fi.click(); }
+function pickFiles(accept) { const fi = $('#fileInput'); fi.accept = accept || '.ksh,.vox,.ogg,.mp3,.wav,.flac,.m4a,.opus,audio/*'; fi.value = ''; fi.click(); }
 $('#fileInput').addEventListener('change', (e) => { if (e.target.files.length) openFiles([...e.target.files]); });
 const AUDIO_RE = /\.(ogg|mp3|wav|flac|m4a|opus|aac|webm)$/i;
 function confirmDiscard() { return !ed.dirty || confirm('Discard unsaved changes to ' + ed.fileName + '?'); }
 async function openFiles(files, handles) {
 	const chartFile = files.find(f => /\.ksh$/i.test(f.name));
+	const voxFile = !chartFile && files.find(f => /\.vox$/i.test(f.name));
+	if (voxFile) {
+		if (!confirmDiscard()) return;
+		const r = SDVX.importVox(new TextDecoder('utf-8').decode(await voxFile.arrayBuffer()), voxFile.name);
+		ed.loadChart(r.chart, voxFile.name.replace(/\.vox$/i, '.ksh'));
+		ed.fileHandle = null; ed.dirHandle = null;
+		tl.bottomTick = -tl.h * 0.15 / tl.ppt;
+		showWarnings('Imported ' + voxFile.name, 'The SOUND VOLTEX chart was converted to the editor\'s format: notes, lasers, slams, spins, FX hold effects, laser effects, camera and tilt. Save writes it as .ksh.', r.warnings);
+	}
+	if (files.some(f => /\.s3v$/i.test(f.name)) && !files.some(f => AUDIO_RE.test(f.name))) toast('.s3v audio (WMA Pro) can\'t be decoded by browsers; convert it to .ogg or .wav first.', true);
 	const kson = files.find(f => /\.kson$/i.test(f.name));
 	if (kson && !chartFile) toast('.kson is not supported yet; please open the .ksh version.', true);
 	let audio = files.find(f => AUDIO_RE.test(f.name));
@@ -711,7 +723,7 @@ async function loadAudio(file) {
 async function openDialog() {
 	if ('showOpenFilePicker' in window) {
 		try {
-			const hs = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'KSH chart / audio', accept: { 'text/plain': ['.ksh'], 'audio/*': ['.ogg', '.mp3', '.wav', '.flac', '.m4a', '.opus'] } }] });
+			const hs = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'KSH / VOX chart, audio', accept: { 'text/plain': ['.ksh', '.vox'], 'audio/*': ['.ogg', '.mp3', '.wav', '.flac', '.m4a', '.opus'] } }] });
 			const files = await Promise.all(hs.map(x => x.getFile()));
 			const map = new Map(hs.map((x, i) => [files[i].name, x]));
 			return openFiles(files, map);
@@ -791,21 +803,25 @@ function exportSdvxDialog() {
 	const jacket = h('input', { type: 'file', accept: 'image/*' });
 	const hasAudio = !!(ed.audio.srcBytes);
 	const audioChk = h('input', { type: 'checkbox', checked: hasAudio, disabled: !hasAudio });
-	const x10 = h('input', { type: 'checkbox', checked: !!S.sdvxLevelX10 });
+	const x10 = h('input', { type: 'checkbox', checked: S.sdvxLevelX10 !== false });
+	const existing = h('input', { type: 'checkbox', checked: !!S.sdvxExisting, onchange: () => { if (existing.checked) audioChk.checked = false; else audioChk.checked = hasAudio; } });
+	if (existing.checked) audioChk.checked = false;
 	const body = h('div', { class: 'sdvx-export' },
-		h('div', { class: 'note' }, 'Makes a .zip for data_mods: music/<id>_<name>/ with the .vox chart, the song and preview as .2dx, jackets, and others/music_db.merged.xml with the song entry. Settings are remembered.'),
+		h('div', { class: 'note' }, 'Makes a .zip shaped like the game\'s own song folders: <id>_<name>/ with the .vox chart, jackets and the song + preview audio, ready to drop into data/music, plus the music_db entry to paste into data/others/music_db.xml (README inside). Settings are remembered.'),
+		row('Existing song', h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, existing, 'add this chart to a song already in the game (use its ID and name; no audio, only this difficulty\'s music_db block)')),
 		row('Song ID', inp('id', S.sdvxId || 2000, '80px'), h('span', { class: 'muted' }, 'must not clash with other songs')),
 		row('ASCII name', inp('ascii', S.sdvxAscii || sanitize(m.title_translit || m.title) || 'custom', '160px'), h('span', { class: 'muted' }, 'letters, digits, _ and -')),
 		row('Chart slot', sel('slot', SDVX.SLOTS.map(s => [s.id, s.label]), slotDef)),
 		row('INF slot type', sel('inf', [['2', 'INF'], ['3', 'GRV'], ['4', 'HVN'], ['5', 'VVD'], ['6', 'XCD']], String(S.sdvxInf || 6)), h('span', { class: 'muted' }, 'only for slot 4')),
-		row('Level', inp('level', m.level || '1', '50px'), h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, x10, '×10 (∇ format, 19.5 → 195)')),
-		row('Game version', sel('version', [['1', '1 BOOTH'], ['2', '2 II'], ['3', '3 III'], ['4', '4 IV'], ['5', '5 V'], ['6', '6 EXCEED GEAR'], ['7', '7 ∇']], String(S.sdvxVersion || 6))),
+		row('Level', inp('level', S.sdvxLevel && S.sdvxLevelFor === ed.fileName ? S.sdvxLevel : (m.level || '1'), '50px'), h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, x10, '×10 for ∇ / EG decimals (19.7 → 197)')),
+		row('Game version', sel('version', [['1', '1 BOOTH'], ['2', '2 II'], ['3', '3 III'], ['4', '4 IV'], ['5', '5 V'], ['6', '6 EXCEED GEAR'], ['7', '7 ∇']], String(S.sdvxVersion || 7)), h('span', { class: 'muted' }, 'version the song is listed under')),
+		row('VOX format', sel('format', [['12', '12 (current games)'], ['10', '10 (older tools)']], String(S.sdvxFormat || 12))),
 		row('Title', inp('title', m.title, '220px')), row('Title (yomigana)', inp('titleYomi', S.sdvxTitleYomi || '', '220px', 'reading in katakana, optional')),
 		row('Artist', inp('artist', m.artist, '220px')), row('Artist (yomigana)', inp('artistYomi', '', '220px', 'optional')),
 		row('Illustrator', inp('illustrator', m.illustrator, '160px')), row('Effected by', inp('effector', m.effect, '160px')),
 		row('BPM range', inp('bpmMin', K.fmtNum(Math.min(...bpms)), '60px'), h('span', { class: 'muted' }, 'to'), inp('bpmMax', K.fmtNum(Math.max(...bpms)), '60px')),
 		row('Music volume', inp('volume', S.sdvxVolume || 91, '50px'), h('span', { class: 'muted' }, 'music_db volume (game default 91)')),
-		row('Laser right edge', sel('edge', [['124', '124 (same as your 2811 files)'], ['127', '127 (full VOX range)']], String(S.sdvxEdge || 124))),
+		row('Laser right edge', sel('edge', [['124', '124 (same as your 2811 files)'], ['127', '127 (full range)']], String(S.sdvxEdge || 124)), h('span', { class: 'muted' }, 'format 10 only')),
 		row('Jacket image', jacket),
 		row('Song audio', h('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, audioChk, hasAudio ? 'make .2dx from ' + ed.audio.fileName : 'load the song first to make .2dx files')),
 		row('Preview', h('span', { class: 'muted' }, 'from ' + ((parseInt(m.po, 10) || 0) / 1000).toFixed(1) + ' s for ' + (((parseInt(m.plength, 10) || 15000)) / 1000).toFixed(1) + ' s (po / plength in the Chart tab)')),
@@ -816,21 +832,21 @@ function exportSdvxDialog() {
 		if (!(id > 0 && id < 10000)) return toast('Song ID must be 1–9999', true);
 		if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(ascii)) return toast('ASCII name: letters, digits, _ and - only', true);
 		const lv = parseFloat(f.level.value) || 1;
-		Object.assign(S, { sdvxId: id, sdvxAscii: ascii, sdvxInf: +f.inf.value, sdvxVersion: +f.version.value, sdvxVolume: parseInt(f.volume.value, 10) || 91, sdvxEdge: +f.edge.value, sdvxLevelX10: x10.checked });
+		Object.assign(S, { sdvxId: id, sdvxAscii: ascii, sdvxInf: +f.inf.value, sdvxVersion: +f.version.value, sdvxVolume: parseInt(f.volume.value, 10) || 91, sdvxEdge: +f.edge.value, sdvxLevelX10: x10.checked, sdvxFormat: +f.format.value, sdvxExisting: existing.checked, sdvxLevel: f.level.value, sdvxLevelFor: ed.fileName });
 		ed.saveSettings();
 		btn.disabled = true;
 		try {
 			const r = await SDVX.buildPackage(ed.chart, {
 				id, ascii, slot: f.slot.value, infVer: f.slot.value === 'infinite' ? +f.inf.value : (f.slot.value === 'maximum' ? 0 : 0),
 				difnum: Math.round(x10.checked ? lv * 10 : lv), version: +f.version.value, volume: K.clamp(parseInt(f.volume.value, 10) || 91, 0, 127),
-				laserEdge: +f.edge.value, title: f.title.value, artist: f.artist.value, titleYomi: f.titleYomi.value, artistYomi: f.artistYomi.value,
+				laserEdge: +f.edge.value, format: +f.format.value, existing: existing.checked, title: f.title.value, artist: f.artist.value, titleYomi: f.titleYomi.value, artistYomi: f.artistYomi.value,
 				illustrator: f.illustrator.value, effector: f.effector.value, bpmMin: parseFloat(f.bpmMin.value) || bpms[0], bpmMax: parseFloat(f.bpmMax.value) || bpms[0],
 				jacket: jacket.files[0] || null, audioBytes: audioChk.checked ? ed.audio.srcBytes : null,
 				offsetMs: parseInt(m.o, 10) || 0, previewMs: (parseInt(m.po, 10) || 0), previewLen: parseInt(m.plength, 10) || 15000,
 			}, (msg) => { status.textContent = msg; });
 			const name = String(id).padStart(4, '0') + '_' + ascii + '_sdvx.zip';
 			const a = h('a', { href: URL.createObjectURL(r.blob), download: name }); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
-			showWarnings('SOUND VOLTEX export', 'Saved ' + name + ' (' + r.files.length + ' files). Copy the folder inside it to your data_mods folder.', r.warnings, 'Everything converted.');
+			showWarnings('SOUND VOLTEX export', 'Saved ' + name + ' (' + r.files.length + ' files). Copy the "' + r.stem + '" folder into data/music and add the music_db entry (see README.txt in the zip).', r.warnings, 'Everything converted.');
 		} catch (e) { console.error(e); toast('Export failed: ' + (e.message || e), true); btn.disabled = false; }
 	};
 	const btn = h('button', { class: 'on', onclick: go }, 'Export .zip');

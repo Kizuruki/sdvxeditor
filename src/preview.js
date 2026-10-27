@@ -32,7 +32,7 @@ const PV = {
 	TRACK_LEN: 12,        // portrait
 	BTN_W: 1 / 6,
 	FOV: 90, PITCH_OFFSET: 0.25,
-	ROLL_IGNORE: 0.1, SLAM_DUR: 0.1,
+	ROLL_IGNORE: 0.1, SLAM_DUR: 0.1, SLAM_SEC: 0.04,
 };
 
 function uscPitchScale(input) { // PitchScaleFunc (portrait constants)
@@ -388,8 +388,10 @@ class Preview3D {
 		}
 
 		// ---- lasers (USC: x = (pos - 0.5) * (trackWidth - laserWidth), width = 1/6)
-		const LW = BW, lx = (pos) => (pos - 0.5) * (1 - LW), SLAM_H = LW * 0.9;
-		const lcol = ['rgba(40,170,255,0.62)', 'rgba(255,50,160,0.62)'];
+		// USC/SDVX: a slam bar is as long as the lane scrolls in 50 ms, so it gets thicker with speed
+		const LW = BW, lx = (pos) => (pos - 0.5) * (1 - LW);
+		const slamLen = (t) => Math.max(LW * 0.5, yOf(this.tickAtSec(this.secAt(t) + PV.SLAM_SEC)) - yOf(t));
+		const lcol = ['rgba(40,170,255,0.62)', 'rgba(255,50,160,0.62)'], lslam = ['rgba(50,180,255,0.75)', 'rgba(255,60,170,0.75)'];
 		const cursors = [];
 		c.globalCompositeOperation = 'lighter';
 		for (let lane = 0; lane < 2; lane++) {
@@ -400,12 +402,13 @@ class Preview3D {
 				const pts = s.pts;
 				for (let k = 0; k < pts.length; k++) {
 					const p = pts[k], q = pts[k + 1], t = s.t + p.ry, slam = p.v !== p.vf;
-					if (slam && t >= drawTick - 1) { // slam: horizontal bar
+					const SLAM_H = slam ? slamLen(t) : 0;
+					if (slam && yOf(t) + SLAM_H > 0) { // slam: horizontal bar
 						const y = yOf(t), xa = lx(K.laserPos(p.v, s.wide)), xb = lx(K.laserPos(p.vf, s.wide));
-						quad(mT, Math.min(xa, xb) - LW / 2, Math.max(xa, xb) + LW / 2, y, y + SLAM_H, lcol[lane]);
+						quad(mT, Math.min(xa, xb) - LW / 2, Math.max(xa, xb) + LW / 2, Math.max(0, y), y + SLAM_H, lslam[lane]);
 					}
 					if (!q) { // short tail after a final slam
-						if (slam) { const y = yOf(t) + SLAM_H, x = lx(K.laserPos(p.vf, s.wide)); quad(mT, x - LW / 2, x + LW / 2, Math.max(0, y), y + LW * 1.2, lcol[lane]); }
+						if (slam) { const y = yOf(t) + SLAM_H, x = lx(K.laserPos(p.vf, s.wide)); quad(mT, x - LW / 2, x + LW / 2, Math.max(0, y), y + SLAM_H * 0.6, lcol[lane]); }
 						continue;
 					}
 					const tq = s.t + q.ry;

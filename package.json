@@ -5,7 +5,7 @@
   "description": "SDVX / K-Shoot MANIA (.ksh) chart editor in the style of MikuMikuWorld",
   "scripts": {
     "build": "node build.js",
-    "test": "node tests/core.test.js ../libkson/tests/assets && node tests/export.test.js",
+    "test": "node tests/core.test.js ../libkson/tests/assets && node tests/export.test.js && node tests/fx.test.js",
     "test:e2e": "node tests/make_wav.js tests/.out/click150.wav 150 0.5 40 && node tests/e2e.js tests/.out tests/.out"
   },
   "devDependencies": {
