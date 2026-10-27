@@ -109,6 +109,13 @@ const SDVX = (() => {
 		const filterAt = (t) => { const p = K.lastAtOrBefore(c.filterType, t); return KSMFX.tabCode(KSMFX.filterKind(p ? p.v : c.meta.filtertype, defines)); };
 		const spinAt = new Map(c.spins.map(s => [s.t, s]));
 		const usedSpins = new Set();
+		// SDVX has no spin direction: the game turns with the slam the roll sits on (the importer reads it back the same
+		// way: spin dir = -slam dir). When several slams share the spin's tick, use one that goes the right way.
+		const spinSlam = new Map();
+		for (const pass of [true, false]) for (const lane of c.laser) for (const sec of lane) for (const p of sec.pts) {
+			const sp = spinAt.get(sec.t + p.ry); if (!sp || spinSlam.has(sp) || p.v === p.vf) continue;
+			if (!pass || Math.sign(p.vf - p.v) === -sp.dir) spinSlam.set(sp, p);
+		}
 		// SDVX spin durations include the overshoot, so they are twice the KSH length
 		const rollCode = (s) => {
 			const beats = 2 * s.l / 240;
@@ -128,7 +135,7 @@ const SDVX = (() => {
 					const t = s.t + p.ry, fc = filterAt(t);
 					if (p.v !== p.vf) {
 						const sp = spinAt.get(t); let roll = [0, 0];
-						if (sp) { roll = rollCode(sp); usedSpins.add(sp); }
+						if (sp && spinSlam.get(sp) === p) { roll = rollCode(sp); usedSpins.add(sp); }
 						rows.push(row(t, p.v, i === 0 ? 1 : 0, roll, fc));
 						rows.push(row(t, p.vf, i === last ? 2 : 0, [0, 0], fc));
 					} else rows.push(row(t, p.v, i === 0 ? 1 : i === last ? 2 : 0, [0, 0], fc));
@@ -202,7 +209,7 @@ const SDVX = (() => {
 		let def = 'type=' + type;
 		if (/Retrigger|Gate|Wobble|Echo/.test(type) && a) def += ';waveLength=1/' + a;
 		if (type === 'Echo' && b) def += ';feedbackLevel=' + b + '%';
-		if (type === 'BitCrusher' && a) def += ';amount=' + a + 'samples';
+		if (type === 'BitCrusher' && a) def += ';reduction=' + a + 'samples;amount=' + a + 'samples'; // KSM reads reduction, USC reads amount
 		if (type === 'PitchShift' && a) def += ';pitch=' + a;
 		if (type === 'TapeStop' && a) def += ';speed=' + a + '%';
 		return def;
@@ -319,7 +326,7 @@ const SDVX = (() => {
 				if (roll) {
 					const nx = lr[i + 1], dir = nx && tick(nx[0]) === t ? Math.sign((+nx[1]) * scale - v) || 1 : 1;
 					const len = +lenCol || 0, beats = roll >= 6 ? (len ? len / 10 : DEF_ROLL[roll]) : (len || DEF_ROLL[roll]);
-					c.spins.push({ id: id(), t, kind: roll === 5 || roll === 7 ? 'half' : 'spin', dir: -dir, l: Math.max(60, Math.round(beats / 2 * 240)), amp: 250, rep: 3, dec: 2 });
+					if (!c.spins.some(x => x.t === t)) c.spins.push({ id: id(), t, kind: roll === 5 || roll === 7 ? 'half' : 'spin', dir: -dir, l: Math.max(60, Math.round(beats / 2 * 240)), amp: 250, rep: 3, dec: 2 });
 				}
 				if (node === 2) finish();
 			}

@@ -283,7 +283,7 @@ class Editor {
 			const s = arr[i];
 			for (let k = 0; k < s.pts.length; k++) {
 				const p = s.pts[k], q = s.pts[k + 1], tp = s.t + p.ry;
-				if (p.v !== p.vf) { const yy = tv.yOf(tp), x0 = tv.laserX(Math.min(p.v, p.vf)) - L * 0.3, x1 = tv.laserX(Math.max(p.v, p.vf)) + L * 0.3; if (y <= yy + 2 && y >= yy - 12 && x >= x0 && x <= x1) return { kind: 'lslam', lane, sec: s, idx: k, item: p }; }
+				if (p.v !== p.vf) { const yy = tv.yOf(tp), x0 = tv.laserX(Math.min(p.v, p.vf)) - L * 0.3, x1 = tv.laserX(Math.max(p.v, p.vf)) + L * 0.3; if (y <= yy + 2 && y >= yy - tv.slamH() - 2 && x >= x0 && x <= x1) return { kind: 'lslam', lane, sec: s, idx: k, item: p }; }
 				if (!q) continue;
 				const tq = s.t + q.ry;
 				if (t >= tp && t <= tq) {
@@ -316,9 +316,10 @@ class Editor {
 		for (const s of c.stops) { if (near(s.t)) return { kind: 'stop', item: s }; }
 		return null;
 	}
-	hitSpin(x, y) {
+	hitSpin(x, y, labelOnly) {
 		const tv = this.tl;
-		if (x < tv.trackR - 80 || x > tv.trackR + 2) return null;
+		for (const r of tv.spinHits || []) if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) return { kind: 'spin', item: r.item };
+		if (labelOnly || x < tv.trackR - 80 || x > tv.trackR + 2) return null;
 		for (const s of this.chart.spins) if (Math.abs(tv.yOf(s.t) - 1 - y) <= 7) return { kind: 'spin', item: s };
 		return null;
 	}
@@ -372,8 +373,8 @@ class Editor {
 			return;
 		}
 		if (reg.kind !== 'track') return;
-		const sp = this.tool === 'select' ? this.hitSpin(x, y) : null;
-		if (sp) { this.setSel([sp.item.id], shift || ctrl); return; }
+		const sp = this.hitSpin(x, y, this.tool !== 'select'); // the purple label works with every tool
+		if (sp) { this.setSel([sp.item.id], shift || ctrl); if (dbl) this.editSpinPopover(sp.item, e.clientX, e.clientY); return; }
 		const hit = this.hitTrack(x, y);
 		const tool = this.tool;
 		if (tool === 'select') {
@@ -883,7 +884,7 @@ class Editor {
 	// ---------------------------------------------------------------- delete / clipboard / mirror
 	deleteAt(x, y, reg) {
 		let h = null;
-		if (reg.kind === 'track') h = (this.tool === 'select' && this.hitSpin(x, y)) || this.hitTrack(x, y, this.tool === 'laserL' || this.tool === 'laserR' ? this.tool : 'select');
+		if (reg.kind === 'track') h = this.hitSpin(x, y, this.tool !== 'select') || this.hitTrack(x, y, this.tool === 'laserL' || this.tool === 'laserR' ? this.tool : 'select');
 		else if (reg.kind === 'cam') h = this.hitCam(reg.col, x, y);
 		else if (reg.kind === 'timing') h = this.hitTiming(x, y);
 		if (!h) return;
@@ -1047,7 +1048,7 @@ class Editor {
 	setEvent(key, id, patch, label) { this.edit(label || 'Edit event', c => { const o = c[key].find(x => x.id === id); if (o) this.replaceIn(c[key], id, { ...o, ...patch }); }); }
 	editEventPopover(key, item, cx, cy) {
 		const H = EVENT_HELP[key] || {};
-		if (key === 'filterType') popover(cx, cy, H.title, [{ key: 'v', label: 'Effect', type: 'select', value: item.v, options: [...new Set([item.v, 'peak', 'lpf1', 'hpf1', 'bitc'])].map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Laser effect'));
+		if (key === 'filterType') popover(cx, cy, H.title, [{ key: 'v', label: 'Effect', type: 'select', value: item.v, options: [...new Set([item.v, 'peak', 'lpf1', 'hpf1', 'bitc', ...Object.keys(KSMFX.parseDefines(this.chart.defs)).filter(k => k.startsWith('filter:')).map(k => k.slice(7))])].map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Laser effect'));
 		else if (key === 'pfilterGain' || key === 'slamVol') popover(cx, cy, H.title, [{ key: 'v', label: 'Value', type: 'number', value: item.v, hint: H.short }], v => this.setEvent(key, item.id, { v: String(K.clamp(parseInt(v.v, 10) || 0, 0, 100)) }));
 		else if (key === 'slamSE') popover(cx, cy, H.title, [{ key: 'v', label: 'Sound', type: 'select', value: item.v, options: K.SLAM_SOUNDS.map(v => [v, v]), hint: H.short }], v => this.setEvent(key, item.id, { v: v.v }, 'Slam sound'));
 		else if (key === 'raw') popover(cx, cy, H.title, [{ key: 'k', label: 'Key', type: 'text', value: item.k, hint: '"//" = comment, empty = plain line' }, { key: 'v', label: 'Value', type: 'text', value: item.v }], v => this.setEvent(key, item.id, { k: v.k, v: v.v }, 'Edit line'));
@@ -1079,17 +1080,31 @@ class Editor {
 		if (h.kind === 'ev') { this.editEventPopover(h.key, h.item, cx, cy); return; }
 		if (h.kind === 'bpm') popover(cx, cy, 'BPM change', [{ key: 'v', label: 'BPM', type: 'number', value: K.fmtNum(h.item.v) }], v => { const b = parseFloat(v.v); if (b > 0) this.setBpmAt(h.item.t, b); });
 		else if (h.kind === 'sig') popover(cx, cy, 'Time signature (measure ' + (h.item.m + 1) + ')', [{ key: 'v', label: 'Beats', type: 'text', value: h.item.n + '/' + h.item.d }], v => { const [n, d] = String(v.v).split('/').map(x => parseInt(x, 10)); if (n > 0 && [1, 2, 4, 8, 16, 32, 64].includes(d)) this.setSigAt(h.item.m, n, d); });
+		else if (h.kind === 'spin') this.editSpinPopover(h.item, cx, cy);
 		else if (h.kind === 'stop') popover(cx, cy, 'Stop', [{ key: 'v', label: 'Length', type: 'text', value: fmtLen(h.item.l) }], v => { const l = parseLen(v.v); if (l > 0) this.edit('Edit stop', c => this.replaceIn(c.stops, h.item.id, { ...h.item, l })); });
 	}
 	setBpmAt(t, b) { this.edit('BPM ' + K.fmtNum(b), c => { const ex = K.findAt(c.bpm, t); if (ex) this.replaceIn(c.bpm, ex.id, { ...ex, v: b }); else K.insertSorted(c.bpm, { id: K.nid(), t, v: b }); }); }
 	setSigAt(m, n, d) { this.edit('Time signature ' + n + '/' + d, c => { const ex = c.sig.find(s => s.m === m); if (ex) this.replaceIn(c.sig, ex.id, { ...ex, n, d }); else { c.sig.push({ id: K.nid(), m, n, d }); c.sig.sort((a, b) => a.m - b.m); } }); }
+	// set / replace / remove (code '') the spin on tick t; extra may carry swing settings {amp, rep, dec}
 	setSpinAt(t, code, l, extra = {}) {
-		this.edit('Spin', c => {
+		this.edit(code ? 'Spin' : 'Remove spin', c => {
+			const old = c.spins.find(s => s.t === t);
 			c.spins = c.spins.filter(s => s.t !== t);
 			if (!code) return;
-			const sp = { id: K.nid(), t, kind: code[0] === 'S' ? 'swing' : (code[1] === '(' || code[1] === ')') ? 'spin' : 'half', dir: (code[1] === '(' || code[1] === '<') ? -1 : 1, l, amp: 250, rep: 3, dec: 2, ...extra };
+			const pick = (k, d) => extra[k] ?? (old ? old[k] : undefined) ?? d;
+			const sp = { id: old ? old.id : K.nid(), t, kind: code[0] === 'S' ? 'swing' : (code[1] === '(' || code[1] === ')') ? 'spin' : 'half', dir: (code[1] === '(' || code[1] === '<') ? -1 : 1, l: l > 0 ? l : (old ? old.l : 960), amp: pick('amp', 250), rep: pick('rep', 3), dec: pick('dec', 2) };
 			K.insertSorted(c.spins, sp);
 		});
+	}
+	editSpinPopover(s, cx, cy) {
+		const swing = (v) => String(v.code)[0] === 'S';
+		popover(cx, cy, EVENT_HELP.spins.title, [
+			{ key: 'code', label: 'Effect', type: 'select', value: spinCode(s), options: SPIN_OPTIONS, hint: 'None removes it. Help → Lane spins explains each one.' },
+			{ key: 'len', label: 'Length', type: 'text', value: fmtLen(s.l), hint: 'measures (1 = one 4/4 measure)' },
+			{ key: 'amp', label: 'Swing size', type: 'number', value: String(s.amp ?? 250), show: swing },
+			{ key: 'rep', label: 'Swings', type: 'number', value: String(s.rep ?? 3), show: swing },
+			{ key: 'dec', label: 'Decay', type: 'select', value: String(s.dec ?? 2), options: [['0', 'no decay'], ['1', 'linear'], ['2', 'squared']], show: swing },
+		], v => { const l = parseLen(v.len); this.setSpinAt(s.t, v.code, l > 0 ? l : s.l, { amp: parseInt(v.amp, 10) || 250, rep: parseInt(v.rep, 10) || 3, dec: +v.dec }); });
 	}
 	editCamPopover(key, p, cx, cy) {
 		const isTilt = key === 'tilt';
