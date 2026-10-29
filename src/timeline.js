@@ -16,6 +16,9 @@ const COL_INFO = {
 };
 const ALL_COLS = ['zoom_top', 'zoom_bottom', 'zoom_side', 'tilt', 'rotation_deg', 'center_split', 'scroll_speed'];
 
+// laser fill, edge / centre line, solid (handles, 2x tag)
+const LASER_COLS = [['rgba(47,184,255,0.55)', '#8fdcff', '#2fb8ff'], ['rgba(255,61,154,0.55)', '#ffa3cc', '#ff3d9a']];
+
 class TimelineView {
 	constructor(canvas, ed) {
 		this.cv = canvas; this.ctx = canvas.getContext('2d', { alpha: false });
@@ -116,8 +119,9 @@ class TimelineView {
 			c.strokeStyle = '#26262e'; c.beginPath(); c.moveTo(x, 0); c.lineTo(x, this.h); c.stroke();
 		}
 
-		this._drawNotes(t0, t1);
 		this._drawLasers(t0, t1);
+		this._drawNotes(t0, t1);       // notes sit on top of lasers
+		this._drawLaserHandles(t0, t1); // laser points stay grabbable above the notes
 		this._drawSpins(t0, t1);
 		this._drawTimingCol(t0, t1);
 		for (const col of this.cols) this._drawCamCol(col, t0, t1);
@@ -288,12 +292,10 @@ class TimelineView {
 	_drawLasers(t0, t1) {
 		const c = this.ctx, ed = this.ed, ch = ed.chart, L = this.laneW;
 		const hw = L * 0.27;
-		// see-through enough that BT / FX notes under a laser stay visible; slams a bit stronger
-		const cols = [['rgba(47,184,255,0.28)', '#8fdcff', '#2fb8ff', 'rgba(47,184,255,0.42)'], ['rgba(255,61,154,0.28)', '#ffa3cc', '#ff3d9a', 'rgba(255,61,154,0.42)']];
-		const showHandles = ed.tool === 'select' || ed.tool === 'laserL' || ed.tool === 'laserR';
+		const cols = LASER_COLS;
 		for (let lane = 0; lane < 2; lane++) {
 			const arr = ch.laser[lane];
-			const [fill, edge, solid, slamFill] = cols[lane];
+			const [fill, edge, solid] = cols[lane];
 			let i0 = K.upperBound(arr, t1);
 			for (let i = i0 - 1; i >= 0; i--) {
 				const sec = arr[i];
@@ -305,7 +307,7 @@ class TimelineView {
 					if (kind === 'slam') {
 						const y = this.yOf(a), x0 = this.laserX(b), x1 = this.laserX(cc);
 						const sx = Math.min(x0, x1) - hw, sw = Math.abs(x1 - x0) + hw * 2;
-						c.fillStyle = slamFill; c.fillRect(sx, y - slamH, sw, slamH);
+						c.fillRect(sx, y - slamH, sw, slamH); c.fillRect(sx, y - slamH, sw, slamH); // double fill: slams read stronger than the trail
 						c.fillStyle = edge; c.fillRect(sx, y - slamH, sw, 2); c.fillRect(sx, y - 1, sw, 1); c.fillStyle = fill;
 					} else {
 						const ya = this.yOf(a), yb = this.yOf(cc);
@@ -337,7 +339,18 @@ class TimelineView {
 					c.fillStyle = solid; c.font = '700 10px sans-serif'; c.textBaseline = 'top';
 					c.fillText('2x', this.laserX(sec.pts[0].v) + hw + 2, this.yOf(sec.t) + 1);
 				}
-				// handles
+			}
+		}
+	}
+
+	_drawLaserHandles(t0, t1) {
+		const c = this.ctx, ed = this.ed, ch = ed.chart;
+		const showHandles = ed.tool === 'select' || ed.tool === 'laserL' || ed.tool === 'laserR';
+		for (let lane = 0; lane < 2; lane++) {
+			const arr = ch.laser[lane], solid = LASER_COLS[lane][2];
+			for (let i = K.upperBound(arr, t1) - 1; i >= 0; i--) {
+				const sec = arr[i];
+				if (K.sectionEndTick(sec) < t0) { if (sec.t + 960 * 32 < t0) break; continue; }
 				for (const p of sec.pts) {
 					const isSel = ed.sel.has(p.id), y = this.yOf(sec.t + p.ry);
 					if (!showHandles && !isSel) continue;
