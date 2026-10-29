@@ -59,6 +59,16 @@ const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL ') + m); if (!c) fail
   s = await st();
   ok(JSON.stringify(s.fx[0]) === '[[480,0,""]]', 'FX chip placed on FX-L');
   ok(JSON.stringify(s.fx[1]) === '[[720,480,"Retrigger;8"]]', 'FX hold on FX-R with Retrigger;8 from the option bar');
+  // dragging a note while scrolling the view keeps it under the cursor
+  await p.keyboard.press('1');
+  const grab = await pos('bt', 0, 0), bottom0 = await p.evaluate(() => window.KSMEditor.tl.bottomTick);
+  await p.mouse.move(grab.x, grab.y); await p.mouse.down(); await p.mouse.move(grab.x, grab.y - 5, { steps: 2 });
+  await p.mouse.wheel(0, -100); await p.waitForTimeout(80);
+  const held = await p.evaluate(() => window.KSMEditor.ed.chart.bt[0][0].t), scrolled = await p.evaluate((b) => window.KSMEditor.tl.bottomTick - b, bottom0);
+  await p.mouse.up();
+  ok(scrolled > 0 && Math.abs(held - scrolled) <= 60, 'a held note follows the scroll (moved ' + held + ' ticks, view scrolled ' + Math.round(scrolled) + ')');
+  await p.keyboard.press('Control+z'); await p.evaluate((b) => { window.KSMEditor.tl.bottomTick = b; window.KSMEditor.ed.requestDraw(); }, bottom0);
+  ok(JSON.stringify((await st()).bt[0]) === '[[0,0]]', 'undo puts it back');
 
   console.log('Lasers');
   await p.keyboard.press('4');
