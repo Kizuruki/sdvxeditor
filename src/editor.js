@@ -348,7 +348,7 @@ class Editor {
 				if (shift || ctrl) { this.toggleSel([h.item.id]); return; }
 				if (!this.sel.has(h.item.id)) this.setSel([h.item.id]);
 				if (h.kind !== 'sig' && !(h.kind === 'bpm' && h.item.t === 0)) this.startDrag({ type: 'move', x0: x, y0: y, anchor: { kind: 'timing' }, alt });
-			} else this.drag = { type: 'tpending', x0: x, y0: y, t: this.snapT(t, alt), cx: e.clientX, cy: e.clientY, add: shift || ctrl, base: new Set(this.sel) };
+			} else this.drag = { type: 'tpending', x0: x, y0: y, ty0: t, t: this.snapT(t, alt), cx: e.clientX, cy: e.clientY, add: shift || ctrl, base: new Set(this.sel) };
 			return;
 		}
 		if (reg.kind === 'cam') {
@@ -386,7 +386,7 @@ class Editor {
 				this.startDrag({ type: 'move', x0: x, y0: y, anchor: hit, alt });
 			} else {
 				if (!shift && !ctrl) this.setSel([]);
-				this.drag = { type: 'marquee', x0: x, y0: y, x1: x, y1: y, add: shift || ctrl, base: new Set(this.sel) };
+				this.drag = { type: 'marquee', x0: x, y0: y, ty0: t, x1: x, y1: y, add: shift || ctrl, base: new Set(this.sel) };
 			}
 			return;
 		}
@@ -442,6 +442,7 @@ class Editor {
 	startDrag(d) {
 		this.begin();
 		this._snapDrag = K.cloneChart(this.chart);
+		if (d.y0 !== undefined && d.tick0 === undefined) d.tick0 = this.tl.tickAt(d.y0); // the time grabbed: stays under the cursor while scrolling
 		this.drag = d;
 	}
 	laneAtX(x, kind) {
@@ -459,10 +460,10 @@ class Editor {
 		const t = tv.tickAt(y), alt = e.altKey;
 		switch (d.type) {
 			case 'pan': tv.bottomTick = d.b0 + (y - d.y0) / tv.ppt; break;
-			case 'tpending': if (Math.abs(x - d.x0) + Math.abs(y - d.y0) > 5) { this.drag = { type: 'marquee', x0: d.x0, y0: d.y0, x1: x, y1: y, add: d.add, base: d.base }; if (!d.add) this.sel = new Set(); } break;
+			case 'tpending': if (Math.abs(x - d.x0) + Math.abs(y - tv.yOf(d.ty0)) > 5) { this.drag = { type: 'marquee', x0: d.x0, y0: tv.yOf(d.ty0), ty0: d.ty0, x1: x, y1: y, add: d.add, base: d.base }; if (!d.add) this.sel = new Set(); } break;
 			case 'scrub': this.scrubTo(t, alt); break;
 			case 'marquee': {
-				d.x1 = x; d.y1 = y;
+				d.x1 = x; d.y1 = y; if (d.ty0 !== undefined) d.y0 = tv.yOf(d.ty0);
 				const ids = this.idsInRect(Math.min(d.x0, x), Math.min(d.y0, y), Math.max(d.x0, x), Math.max(d.y0, y));
 				this.sel = d.add ? new Set([...d.base, ...ids]) : new Set(ids);
 				break;
@@ -683,8 +684,9 @@ class Editor {
 	applyMove(x, y, e) {
 		const d = this.drag, tv = this.tl, base = this._snapDrag;
 		const step = this.step;
-		let dt = Math.round((tv.tickAt(y) - tv.tickAt(d.y0)) / step) * step;
-		if (e.altKey) dt = Math.round(tv.tickAt(y) - tv.tickAt(d.y0));
+		const t0 = d.tick0 ?? tv.tickAt(d.y0);
+		let dt = Math.round((tv.tickAt(y) - t0) / step) * step;
+		if (e.altKey) dt = Math.round(tv.tickAt(y) - t0);
 		const a = d.anchor;
 		let dLane = 0, dv = 0;
 		if (a.kind === 'bt') dLane = Math.round((x - d.x0) / tv.laneW);
